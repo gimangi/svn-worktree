@@ -244,7 +244,7 @@ async function main() {
   assert(!clOf('shared.txt'));
   ok('cancelled commit restores; commit P: only P\'s change; user edit stays local, outside changelists');
 
-  // ---------------------------------------------------------------- external commit tool (company tool -> TortoiseSVN on the WC root)
+  // ---------------------------------------------------------------- external commit tool (user opens TortoiseSVN on the WC root)
   await s.refreshScope(scope.id);
   const X = await s.createTask(scope.id, { title: 'ext x' });
   const Y = await s.createTask(scope.id, { title: 'ext y' });
@@ -263,7 +263,7 @@ async function main() {
     .filter((e) => !e.changelist && ['modified', 'added', 'deleted'].includes(e.item)).map((e) => e.path);
   assert(tortoiseDefault.length === 1 && /shared\.txt$/.test(tortoiseDefault[0]), 'only X checked by default: ' + tortoiseDefault.join(', '));
   assert(!(await s.commitDone(X.id)));
-  svn('commit', '--depth', 'empty', '-m', 'commit tool commit', ...tortoiseDefault);
+  svn('commit', '--depth', 'empty', '-m', 'tortoise default selection', ...tortoiseDefault);
   assert(await s.commitDone(X.id), 'commit detected');
   const endX = await s.endCommit(X.id);
   assert(endX.committed, JSON.stringify(endX));

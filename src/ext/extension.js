@@ -477,12 +477,12 @@ async function commitTaskToSvn(t, mode) {
     }
   }
   const e = await env.detect();
-  mode = mode || vscode.workspace.getConfiguration('svnwt').get('commitTool') || 'external';
+  mode = mode || vscode.workspace.getConfiguration('svnwt').get('commitTool') || 'prepare';
   if (mode === 'tortoise' && !e.tortoiseProc) mode = 'vscode';
   const split = plan.setAside.length > 0;
   if (mode === 'ask') {
     const choices = [];
-    choices.push({ label: '$(checklist) 커밋 준비 (사내 커밋 도구에서 커밋)', description: 'TortoiseSVN 커밋 창에 이 작업 파일만 체크되도록 준비', v: 'external' });
+    choices.push({ label: '$(checklist) 커밋 준비', description: 'TortoiseSVN 커밋 창을 직접 열면 이 작업 파일만 체크돼 있도록 준비', v: 'prepare' });
     if (e.tortoiseProc) choices.push({ label: '$(repo-push) TortoiseSVN 커밋 창 바로 열기', description: '이 작업의 파일과 메시지가 채워진 상태로 열림', v: 'tortoise' });
     choices.push({ label: '$(check) VS Code 에서 바로 커밋', description: '확인 창 하나로 커밋', v: 'vscode' });
     if (!split) {
@@ -506,14 +506,14 @@ async function commitTaskToSvn(t, mode) {
   }
 
   const setAsideText = split ? `\n\n커밋하는 동안 잠시 빼 두는 변경 (커밋 후 그대로 돌아옵니다):\n${plan.setAside.map((x) => `  ${x.path} — ${x.reason}`).join('\n')}` : '';
-  if (mode === 'external') {
+  if (mode === 'prepare') {
     const begun = await withProgress(`#${t.no} 커밋 준비 중…`, () => service.beginCommit(t.id, { external: true }));
     await vscode.env.clipboard.writeText(fs.readFileSync(begun.messageFile, 'utf8').trim());
     refreshAll();
     watchExternalCommit(t);
     const warn = begun.otherNewDirs.length ? `\n주의: 다른 작업의 새 폴더 ${begun.otherNewDirs.join(', ')} 는 체크 해제하세요.` : '';
     vscode.window.showInformationMessage(
-      `#${t.no} 커밋 준비 완료. 사내 커밋 도구(TortoiseSVN 커밋 창)에서 이 작업 파일 ${plan.files.length}개만 체크돼 있습니다. 커밋 메시지는 클립보드에 복사했습니다.${warn}`,
+      `#${t.no} 커밋 준비 완료. TortoiseSVN 커밋 창을 열면 이 작업 파일 ${plan.files.length}개만 체크돼 있습니다. 커밋 메시지는 클립보드에 복사했습니다.${warn}`,
       '커밋 취소(되돌리기)').then((a) => { if (a) vscode.commands.executeCommand('svnwt.cancelCommit', t.id); });
     return undefined;
   }
@@ -564,7 +564,7 @@ function watchExternalCommit(t) {
   stopWatching();
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   item.text = `$(sync~spin) #${t.no} 커밋 준비됨`;
-  item.tooltip = `"${t.title}" — 사내 커밋 도구에서 커밋하세요. 이 작업의 파일만 체크돼 있습니다.\n클릭: 커밋 취소(되돌리기)`;
+  item.tooltip = `"${t.title}" — TortoiseSVN 커밋 창을 열어 커밋하세요. 이 작업의 파일만 체크돼 있습니다.\n클릭: 커밋 취소(되돌리기)`;
   item.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
   item.command = { command: 'svnwt.cancelCommit', title: '커밋 취소', arguments: [t.id] };
   item.show();

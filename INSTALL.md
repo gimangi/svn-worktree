@@ -16,11 +16,11 @@ Git / SVN 이 PATH 나 기본 위치에 없으면 설정 `svnwt.gitPath`, `svnwt
 ## 설치
 
 ```powershell
-code --install-extension svn-worktree-0.3.0.vsix
+code --install-extension svn-worktree-0.3.1.vsix
 ```
 
-또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.3.0.vsix`. 설치 후 VS Code 를 재시작합니다.
-의존 패키지가 없어 오프라인(사내망)에서 그대로 설치됩니다.
+또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.3.1.vsix`. 설치 후 VS Code 를 재시작합니다.
+의존 패키지가 없어 오프라인 환경에서도 그대로 설치됩니다.
 
 ## 설치 확인
 
@@ -28,10 +28,10 @@ code --install-extension svn-worktree-0.3.0.vsix
 2. 명령 팔레트 → `SVN Worktree: 환경 점검 (Git / SVN)` → Git / svn 버전이 표시되면 정상.
 3. Copilot Chat(Agent 모드) → 도구(🔧) 목록에 **SVN Worktree** MCP 서버가 있습니다.
 
-## 사내 커밋 도구 사용 시
+## SVN 커밋
 
-기본값(`svnwt.commitTool` = `external`)이 사내 커밋 도구(TortoiseSVN 커밋 창을 띄워 주는 도구) 흐름입니다.
-작업 리뷰 화면 → **커밋 준비** → 사내 커밋 도구로 커밋하면 TortoiseSVN 커밋 창에 그 작업의 파일만 체크돼 있습니다.
+기본값(`svnwt.commitTool` = `prepare`)은 "커밋 준비"만 합니다.
+작업 리뷰 화면 → **커밋 준비** → TortoiseSVN 커밋 창을 직접 열면 그 작업의 파일만 체크돼 있고, 커밋 메시지는 클립보드에 있습니다.
 커밋이 끝나면 자동으로 원상 복구되고, 커밋을 그만두면 **커밋 취소 (되돌리기)** 를 누릅니다.
 
 ## 만드는 파일 / 폴더
@@ -48,7 +48,7 @@ SVN working copy 안에는 아무것도 만들지 않습니다 (`.git` 없음).
 
 - 확장은 네트워크 통신을 하지 않습니다. Git / SVN 이 없을 때 안내 버튼을 누르면 설치 페이지를 브라우저로 여는 것이 전부입니다.
 - `svn commit` 은 사람이 커밋할 때만 실행됩니다 (Copilot 도구에는 커밋 기능이 없음).
-- 소스: `svnwt-0.3.0-source.zip` (JavaScript, 빌드 단계·외부 패키지 없음). 체크섬: `SHA256SUMS.txt`.
+- 소스: `svnwt-0.3.1-source.zip` (JavaScript, 빌드 단계·외부 패키지 없음). 체크섬: `SHA256SUMS.txt`.
 
 ## 제거
 

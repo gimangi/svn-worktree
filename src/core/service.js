@@ -976,8 +976,8 @@ class Service {
    * committed. Always call endCommit afterwards (committed or cancelled) to restore the files.
    */
   /**
-   * @param {{external?:boolean}} opts external: the commit is done by another tool on the whole working
-   *   copy (e.g. a company commit tool that opens TortoiseSVN). Every other changed file in the working
+   * @param {{external?:boolean}} opts external: "prepare only" - the user opens TortoiseSVN's commit dialog
+   *   on the working copy themselves. Every other changed file in the working
    *   copy is moved to TortoiseSVN's reserved changelist "ignore-on-commit" (unchecked by default in the
    *   commit dialog), so only this task's files are checked. endCommit puts the changelists back.
    */
@@ -1051,7 +1051,7 @@ class Service {
     };
   }
 
-  /** During an external commit: has the task been committed yet? (cheap: svn info of the task's files) */
+  /** During a prepared commit: has the task been committed yet? (cheap: svn info of the task's files) */
   async commitDone(ref) {
     const { scope, task } = this.resolveTask(ref);
     const m = this._commitMarker(scope);
@@ -1368,6 +1368,45 @@ class Service {
   listArtifacts(ref) {
     const { scope, task } = this.resolveTask(ref);
     return store.readJson(this._artifactsFile(scope, task.id), []);
+  }
+
+  // ------------------------------------------------------------ agent sessions (one conversation per task)
+  _sessionFile(scope, id) { return path.join(scope.home, 'tasks', id + '.session.json'); }
+
+  getSession(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const s = store.readJson(this._sessionFile(scope, task.id), null) || { entries: [] };
+    if (!Array.isArray(s.entries)) s.entries = [];
+    return s;
+  }
+
+  /** Append entries (role: user | assistant | tool | info). Returns the index of the first appended entry. */
+  appendSession(ref, entries) {
+    const { scope, task } = this.resolveTask(ref);
+    const s = this.getSession(task.id);
+    const list = [].concat(entries);
+    for (const e of list) s.entries.push(Object.assign({ at: now() }, e));
+    if (s.entries.length > 800) s.entries = s.entries.slice(-800);
+    store.writeJson(this._sessionFile(scope, task.id), s);
+    store.touchEvents({ scope: scope.id, task: task.id, session: s.entries.length });
+    return s.entries.length - list.length;
+  }
+
+  updateSessionEntry(ref, index, patch) {
+    const { scope, task } = this.resolveTask(ref);
+    const s = this.getSession(task.id);
+    if (!s.entries[index]) return;
+    Object.assign(s.entries[index], patch);
+    store.writeJson(this._sessionFile(scope, task.id), s);
+    store.touchEvents({ scope: scope.id, task: task.id, session: s.entries.length });
+  }
+
+  /** state: idle | running | waiting | error */
+  setAgentState(ref, state, extra = {}) {
+    const { scope, task } = this.resolveTask(ref);
+    task.agent = Object.assign({}, task.agent || {}, { state, since: now() }, extra);
+    this._saveTask(scope, task);
+    return task.agent;
   }
 
   /** Path mapping between SVN working copy and a task worktree. */

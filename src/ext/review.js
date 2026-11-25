@@ -183,11 +183,11 @@ class ReviewPanel {
     } else if (t.status === 'landed' && info.commitInProgress && info.commitInProgress.mine) {
       title = '커밋 준비됨';
       text = info.commitInProgress.external
-        ? '사내 커밋 도구(TortoiseSVN 커밋 창)에서 커밋하세요. 이 작업의 파일만 체크돼 있고, 커밋 메시지는 클립보드에 있습니다. 커밋이 끝나면 자동으로 정리됩니다.'
+        ? 'TortoiseSVN 커밋 창을 열어 커밋하세요. 이 작업의 파일만 체크돼 있고, 커밋 메시지는 클립보드에 있습니다. 커밋이 끝나면 자동으로 정리됩니다.'
         : '커밋 진행 중입니다.';
       buttons = [['cancelCommit', '커밋 취소 (되돌리기)']];
     } else if (t.status === 'landed') {
-      const external = vscode.workspace.getConfiguration('svnwt').get('commitTool') === 'external';
+      const external = vscode.workspace.getConfiguration('svnwt').get('commitTool') === 'prepare';
       const shared = Object.keys((t.landed && t.landed.shared) || {});
       title = 'SVN 커밋 대기';
       text = `changelist ${t.changelist} · 파일 ${(t.landed && t.landed.files.length) || 0}개가 SVN working copy 에 반영되어 있습니다.`;

@@ -17,7 +17,7 @@ SVN working copy (D:\svn\proj)            svnwt 저장 위치 (D:\svn\proj.svnwt
 1. **Git for Windows** 설치: <https://git-scm.com/download/win> 또는 `winget install --id Git.Git -e`
 2. **SVN 명령줄 클라이언트** 설치: TortoiseSVN 설치 시 *command line client tools* 선택
    (`winget install --id TortoiseSVN.TortoiseSVN -e --override "/passive ADDLOCAL=ALL"`)
-3. 확장 설치: `code --install-extension svn-worktree-0.3.0.vsix`
+3. 확장 설치: `code --install-extension svn-worktree-0.3.1.vsix`
    (또는 VS Code 확장 보기 → `...` → *VSIX에서 설치*)
 4. VS Code 재시작
 
@@ -42,7 +42,7 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
    - SVN 커밋 메시지 편집 (자동 저장)
 4. **changelist 만들기** — 작업 변경을 SVN working copy에 3-way로 반영하고 `svnwt-<id>` changelist로 묶습니다.
    다른 사람이 SVN에 커밋한 내용이나 working copy의 다른 로컬 수정은 유지됩니다.
-5. **SVN 커밋 (사람)** — 리뷰 화면의 *커밋 준비* → 사내 커밋 도구에서 평소처럼 커밋합니다.
+5. **SVN 커밋 (사람)** — 리뷰 화면의 *커밋 준비* → 평소처럼 TortoiseSVN 커밋 창을 열어 커밋합니다.
    커밋 준비를 하면 TortoiseSVN 커밋 창에 **이 작업의 파일만 체크된 상태**로 나오고, 커밋 메시지는 클립보드에 복사돼 있습니다. 파일을 고를 필요 없이 확인하고 OK만 누르면 됩니다.
    커밋이 감지되면 자동으로 원래 상태로 정리되고 작업이 *커밋 완료*로 바뀝니다. 커밋을 그만두려면 *커밋 취소 (되돌리기)*.
 
@@ -56,7 +56,7 @@ SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태�
 
 **여러 작업이 같은 파일을 고친 경우** — 줄이 겹치지 않으면 두 작업 모두 changelist를 만들 수 있습니다(나중 작업에서는 "공유 파일"로 표시). 커밋은 작업마다 따로 하며, 각 리비전에는 그 작업의 변경만 들어갑니다. 같은 줄을 고쳤다면 먼저 커밋한 뒤 나머지 작업을 *최신 SVN 기준으로 rebase* 합니다.
 
-**커밋 방법 설정** (`svnwt.commitTool`): `external`(기본, 커밋 준비만) · `tortoise`(TortoiseSVN 커밋 창을 직접 띄움) · `vscode`(확인 창에서 바로 커밋) · `ask`. 어느 방법이든 이 작업의 변경만 커밋됩니다. 리뷰 화면의 *다른 방법으로 커밋…*으로 그때그때 고를 수도 있습니다.
+**커밋 방법 설정** (`svnwt.commitTool`): `prepare`(기본, 커밋 준비만) · `tortoise`(TortoiseSVN 커밋 창을 직접 띄움) · `vscode`(확인 창에서 바로 커밋) · `ask`. 어느 방법이든 이 작업의 변경만 커밋됩니다. 리뷰 화면의 *다른 방법으로 커밋…*으로 그때그때 고를 수도 있습니다.
 
 **Playwright** — 각 worktree에서 `npm ci` 후 실행합니다. 스크린샷이 남도록 config에 `use: { screenshot: 'on' }`을 두거나 테스트에서 `page.screenshot`을 쓰세요. `test-results/`, `playwright-report/`, `node_modules/`는 작업 커밋에서 자동으로 제외됩니다.
 

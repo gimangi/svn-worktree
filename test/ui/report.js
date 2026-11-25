@@ -28,7 +28,7 @@ const FIXED = [
 // Added after the second round (0.3.0)
 const ADDED = [
   ['같은 파일을 여러 작업이 고친 경우', '다른 작업 changelist 에 있는 파일도 줄이 겹치지 않으면 "공유 파일"로 함께 반영. 커밋할 때 그 파일을 "SVN BASE + 이 작업 변경"으로 잠시 바꿔 작업별로 따로 커밋하고, 끝나면 되돌린 뒤 남은 작업의 changelist 로 넘김'],
-  ['사내 커밋 도구(→ TortoiseSVN)', '"커밋 준비": 다른 변경은 TortoiseSVN 이 기본 체크 해제하는 ignore-on-commit 으로, 이 작업 파일은 changelist 밖으로, 다른 작업의 새 폴더는 잠시 추가 해제. 커밋 메시지는 클립보드. 커밋이 감지되면 자동 원상복구, 취소 버튼으로도 복구'],
+  ['TortoiseSVN 으로 직접 커밋', '"커밋 준비": 다른 변경은 TortoiseSVN 이 기본 체크 해제하는 ignore-on-commit 으로, 이 작업 파일은 changelist 밖으로, 다른 작업의 새 폴더는 잠시 추가 해제. 커밋 메시지는 클립보드. 커밋이 감지되면 자동 원상복구, 취소 버튼으로도 복구'],
   ['사용자 로컬 수정', '작업 파일에 섞인 사용자의 직접 수정도 커밋 동안 빼 두었다가 되돌림 (작업 커밋에 섞이지 않음)'],
   ['리뷰 탭이 작업마다 쌓임', '편집기 미리보기 탭처럼 1개를 재사용. 그 탭에서 버튼을 누르는 등 작업하면 유지되고, "리뷰를 새 탭으로 열기"도 있음'],
   ['중단 복구', '커밋 준비 중 VS Code 가 꺼져도 다시 켜면 감시를 이어 가고, 직접 커밋 중 비정상 종료되면 백업으로 복원'],
@@ -117,7 +117,7 @@ th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);
 </header>
 <main>
 ${body}
-${fs.existsSync(path.join(OUT, 'tortoise-commit.png')) ? `<section id="tortoise"><h2>사내 커밋 도구가 띄우는 TortoiseSVN 커밋 창 (커밋 준비 후, 실제 캡처)</h2>
+${fs.existsSync(path.join(OUT, 'tortoise-commit.png')) ? `<section id="tortoise"><h2>커밋 준비 후 TortoiseSVN 커밋 창 (실제 캡처)</h2>
 <p class="muted">커밋 대기 작업 3개 + 사용자 로컬 수정이 있는 working copy 루트에서 커밋 창을 연 모습. 체크된 것은 이 작업의 파일 1개뿐이고, 다른 작업 파일은 ignore-on-commit(체크 해제), 다른 작업의 새 폴더는 non-versioned 로 보입니다. 창을 닫으면 모두 원래 changelist 로 돌아갑니다.</p>
 <a class="img" href="tortoise-commit.png" target="_blank"><img src="tortoise-commit.png" alt="TortoiseSVN commit dialog" style="width:100%;border:1px solid var(--line);border-radius:6px"></a></section>` : ''}
 <section id="added"><h2>2차 테스트 이후 추가한 기능</h2>

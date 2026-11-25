@@ -1,7 +1,7 @@
 'use strict';
 /**
  * Visual check of the "external commit" preparation: open TortoiseSVN's commit dialog on the whole
- * working copy (the way a company commit tool would) and capture it.
+ * working copy (the way a user opens it from Explorer) and capture it.
  *   SVNWT_HOME=<home> Code.exe(node) tortoise-check.js <wc> <taskTitle> <out.png>
  */
 const path = require('path');

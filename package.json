@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -394,18 +394,18 @@
         "svnwt.commitTool": {
           "type": "string",
           "enum": [
-            "external",
+            "prepare",
             "tortoise",
             "vscode",
             "ask"
           ],
           "enumDescriptions": [
-            "커밋 준비만 함: 사내 커밋 도구가 띄우는 TortoiseSVN 커밋 창에 이 작업 파일만 체크되도록 정리하고, 커밋이 감지되면 자동으로 원상복구",
+            "커밋 준비만 함: TortoiseSVN 커밋 창을 직접 열면 이 작업 파일만 체크돼 있도록 정리하고, 커밋이 감지되면 자동으로 원상복구",
             "TortoiseSVN 커밋 창을 직접 띄움 (이 작업 파일과 커밋 메시지가 채워진 상태)",
             "VS Code 확인 창에서 바로 svn commit",
             "매번 선택"
           ],
-          "default": "external",
+          "default": "prepare",
           "description": "\"SVN 커밋…\" 동작. 어느 방법이든 이 작업의 변경만 커밋되도록 다른 변경은 잠시 빼 두었다가 되돌립니다."
         }
       }

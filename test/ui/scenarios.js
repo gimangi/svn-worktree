@@ -137,7 +137,7 @@ async function scenarios(d, ctx) {
   await d.key('Escape');
 
   // ---------------------------------------------------------------- 4
-  const S4 = '4. SVN 커밋 (사람, 사내 커밋 도구 사용)';
+  const S4 = '4. SVN 커밋 (사람, 커밋 준비 → TortoiseSVN)';
   const svnExe = (await require('../../src/core/env').detect()).svn.path;
   const svnSt = () => require('child_process').execFileSync(svnExe, ['status', ctx.wc], { encoding: 'utf8' });
   await step({ scenario: S4, action: '"docs usage" 리뷰 화면 → "커밋 준비"', expect: '알림 + 상태 표시줄 "커밋 준비됨", 다른 변경은 ignore-on-commit 으로 이동' }, async () => {
@@ -154,7 +154,7 @@ async function scenarios(d, ctx) {
     assert(title === '커밋 준비됨', title);
     return { note: `상태 상자: ${title} / 알림: ${(await d.notifications()).join(' | ').slice(0, 160)}` };
   });
-  await step({ scenario: S4, action: '(사내 도구가 띄운) TortoiseSVN 커밋 창의 기본 선택 확인', expect: '체크되는 항목 = 이 작업의 파일과 새 폴더만', delay: 200 }, async () => {
+  await step({ scenario: S4, action: 'TortoiseSVN 커밋 창의 기본 선택 확인', expect: '체크되는 항목 = 이 작업의 파일과 새 폴더만', delay: 200 }, async () => {
     const st = svnSt();
     const lines = st.split(/\r?\n/);
     const idx = lines.findIndex((l) => /--- Changelist/.test(l));
