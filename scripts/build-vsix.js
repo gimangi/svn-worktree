@@ -52,25 +52,40 @@ const manifest = `<?xml version="1.0" encoding="utf-8"?>
 </PackageManifest>
 `;
 
-const contentTypes = `<?xml version="1.0" encoding="utf-8"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension=".json" ContentType="application/json" />
-  <Default Extension=".vsixmanifest" ContentType="text/xml" />
-  <Default Extension=".js" ContentType="application/javascript" />
-  <Default Extension=".md" ContentType="text/markdown" />
-  <Default Extension=".png" ContentType="image/png" />
-  <Default Extension=".svg" ContentType="image/svg+xml" />
-  <Default Extension=".txt" ContentType="text/plain" />
-  <Default Extension="" ContentType="application/octet-stream" />
-</Types>
-`;
+const MIME = {
+  json: 'application/json', vsixmanifest: 'text/xml', js: 'application/javascript', md: 'text/markdown',
+  png: 'image/png', svg: 'image/svg+xml', txt: 'text/plain', cmd: 'text/plain',
+};
+
+/**
+ * [Content_Types].xml valid for strict OPC readers (System.IO.Packaging): one Default per extension
+ * (OPC spelling without the dot) and an Override for files without an extension.
+ */
+function contentTypesFor(names) {
+  const exts = new Set();
+  const overrides = [];
+  for (const n of names) {
+    const base = n.split('/').pop();
+    const dot = base.lastIndexOf('.');
+    if (dot <= 0) overrides.push(n);
+    else exts.add(base.slice(dot + 1).toLowerCase());
+  }
+  const lines = [];
+  for (const e of [...exts].sort()) {
+    const ct = MIME[e] || 'application/octet-stream';
+    lines.push(`  <Default Extension="${e}" ContentType="${ct}" />`);
+  }
+  for (const n of overrides) lines.push(`  <Override PartName="/${esc(n)}" ContentType="text/plain" />`);
+  return `<?xml version="1.0" encoding="utf-8"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n${lines.join('\n')}\n</Types>\n`;
+}
 
 const { zip } = require('./zip');
 
 const files = [];
 for (const i of INCLUDE) walk(i, files);
+const partNames = ['extension.vsixmanifest', ...files.map((f) => 'extension/' + f)];
 const entries = [
-  { name: '[Content_Types].xml', data: Buffer.from(contentTypes) },
+  { name: '[Content_Types].xml', data: Buffer.from(contentTypesFor(partNames)) },
   { name: 'extension.vsixmanifest', data: Buffer.from(manifest) },
   ...files.map((f) => ({ name: 'extension/' + f, data: fs.readFileSync(path.join(root, f)) })),
 ];

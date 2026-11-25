@@ -16,10 +16,12 @@ Git / SVN 이 PATH 나 기본 위치에 없으면 설정 `svnwt.gitPath`, `svnwt
 ## 설치
 
 ```powershell
-code --install-extension svn-worktree-0.3.1.vsix
+code --install-extension svn-worktree-0.3.2.vsix
 ```
 
-또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.3.1.vsix`. 설치 후 VS Code 를 재시작합니다.
+또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.3.2.vsix`. 설치 후 VS Code 를 재시작합니다.
+
+> **주의**: `.vsix` 파일을 더블클릭하면 Visual Studio 의 *VSIX Installer* 가 열립니다 ("올바른 VSIX 패키지가 아닙니다" 등). 이 확장은 VS Code 용이므로 위 두 방법 중 하나로 **VS Code 에서** 설치하세요.
 의존 패키지가 없어 오프라인 환경에서도 그대로 설치됩니다.
 
 ## 설치 확인
@@ -48,7 +50,7 @@ SVN working copy 안에는 아무것도 만들지 않습니다 (`.git` 없음).
 
 - 확장은 네트워크 통신을 하지 않습니다. Git / SVN 이 없을 때 안내 버튼을 누르면 설치 페이지를 브라우저로 여는 것이 전부입니다.
 - `svn commit` 은 사람이 커밋할 때만 실행됩니다 (Copilot 도구에는 커밋 기능이 없음).
-- 소스: `svnwt-0.3.1-source.zip` (JavaScript, 빌드 단계·외부 패키지 없음). 체크섬: `SHA256SUMS.txt`.
+- 소스: `svnwt-0.3.2-source.zip` (JavaScript, 빌드 단계·외부 패키지 없음). 체크섬: `SHA256SUMS.txt`.
 
 ## 제거
 

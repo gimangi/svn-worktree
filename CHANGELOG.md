@@ -1,5 +1,9 @@
 # 변경 이력
 
+## 0.3.2
+- vsix 패키지 형식 수정: 표준 OPC 검사기(Visual Studio 설치 프로그램 등)에서 "올바른 VSIX 패키지가 아닙니다" 오류가 나던 문제 ([Content_Types].xml)
+- 설치 가이드: .vsix 를 더블클릭하면 Visual Studio 설치 프로그램이 열리므로 VS Code 에서 설치하도록 안내
+
 ## 0.3.1
 - 커밋 방식 설정값 `external` → `prepare` 로 이름 변경, 안내 문구 정리
 
