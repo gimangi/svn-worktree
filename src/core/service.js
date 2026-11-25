@@ -547,6 +547,7 @@ class Service {
     const { scope, task } = this.resolveTask(ref);
     if (task.status === 'archived') return { task, scope: this._scopeSummary(scope) };
     if (checkSvn && task.status === 'landed') await this._detectCommitted(scope, task);
+    if (checkSvn && task.status === 'committed') await this._verifyCommitted(scope, task);
     const { git, tip, base } = await this._range(scope, task);
     const files = await git.nameStatus(base, tip);
     const stats = await git.numstat(base, tip);
@@ -1004,7 +1005,7 @@ class Service {
     }
     if (!committed && files.some((f) => pending.has(f))) return task.status; // still waiting for the human commit
     task.status = committed ? 'committed' : 'active';
-    if (committed) task.committedAt = now();
+    if (committed) { task.committedAt = now(); task.commitVerified = true; }
     else task.landed = null;
     this._saveTask(scope, task);
     if (committed) {
@@ -1436,6 +1437,7 @@ class Service {
     if (committed) {
       fresh.status = 'committed';
       fresh.committedAt = now();
+      fresh.commitVerified = true;
       fresh.leftovers = [];
     } else {
       // cancelled: back to exactly what it was (a changelist made by an earlier version stays)
@@ -1592,6 +1594,45 @@ class Service {
     const moved = task.landed.files.filter((f) => (f in after ? after[f] > ((m.revs || {})[f] || 0) : f in (m.revs || {})));
     for (const f of moved) if (await this._changeInBase(scope, task, f)) return true;
     return false;
+  }
+
+  /**
+   * A task marked "committed" by an older version (0.4.0 and earlier took a vanished file or a revision moved by
+   * svn update as a commit): if none of its change is in SVN, put it back to "커밋 대기" (its changelist is still
+   * in the working copy) or "진행 중". Checked once per task.
+   */
+  async _verifyCommitted(scope, task) {
+    if (task.status !== 'committed' || task.commitVerified) return task.status;
+    if (!task.landed) { task.commitVerified = true; this._saveTask(scope, task); return task.status; }
+    for (const f of task.landed.files || []) {
+      if (await this._changeInBase(scope, task, f)) { task.commitVerified = true; this._saveTask(scope, task); return task.status; }
+    }
+    const svn = await this.svn();
+    const inWc = (await svn.status(scope.wcRoot || scope.svnPath)).some((e) => e.changelist === task.changelist);
+    task.status = inWc ? 'landed' : 'active';
+    if (!inWc) task.landed = null;
+    delete task.committedAt;
+    delete task.leftovers;
+    task.commitVerified = true;
+    task.uncommittedAt = now();
+    this._saveTask(scope, task);
+    return task.status;
+  }
+
+  /** Re-check every task marked committed (see _verifyCommitted). Returns the ones put back. */
+  async reverifyCommitted() {
+    const fixed = [];
+    for (const sc of this.listScopes()) {
+      let scope;
+      try { scope = this.resolveScope(sc.id); } catch (_) { continue; }
+      for (const t of this._listTaskFiles(scope).filter((x) => x.status === 'committed' && !x.commitVerified)) {
+        try {
+          const st = await this._verifyCommitted(scope, t);
+          if (st !== 'committed') fixed.push({ id: t.id, no: t.no, title: t.title, status: st });
+        } catch (_) { /* svn busy: next start */ }
+      }
+    }
+    return fixed;
   }
 
   /** Is the task's (landed) change to `rel` contained in the SVN BASE of the working copy? */

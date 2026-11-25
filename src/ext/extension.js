@@ -947,6 +947,12 @@ async function activate(ctx) {
         else vscode.window.showInformationMessage(`SVN Worktree: 중단된 커밋(${r.task})에서 잠시 빼 둔 변경 ${r.restored}개 파일을 되돌렸습니다.${r.committed ? ' 커밋은 완료된 상태입니다.' : ''}`);
       }
     } catch (e) { log(`recover: ${e.message}`); }
+    try {
+      const fixed = await service.reverifyCommitted();
+      if (fixed.length) {
+        vscode.window.showInformationMessage(`SVN Worktree: SVN 에 커밋되지 않았는데 "커밋 완료" 로 표시돼 있던 작업 ${fixed.length}개를 되돌렸습니다: ${fixed.map((x) => `#${x.no} ${x.status === 'landed' ? '커밋 대기' : '진행 중'}`).join(', ')}`);
+      }
+    } catch (e) { log(`reverify: ${e.message}`); }
     refreshAll();
   }, (e) => log(e.message));
   try { setup.deployServer(ctx); } catch (e) { log(`server deploy: ${e.message}`); }

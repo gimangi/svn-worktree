@@ -393,6 +393,16 @@ async function main() {
   svn('revert', '-q', fcNew);
   fs.unlinkSync(fcNew);
   assert.strictEqual((await s.checkCommitted(FC.id)).status, 'landed', 'a deleted new file is not a commit');
+  { // what 0.4.0 did: marked it committed. The new version puts it back.
+    const f = path.join(scope.home, 'tasks', FC.id + '.json');
+    const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+    j.status = 'committed';
+    fs.writeFileSync(f, JSON.stringify(j, null, 2));
+    const fixed = await s.reverifyCommitted();
+    assert(fixed.some((x) => x.id === FC.id && x.status === 'landed'), JSON.stringify(fixed));
+    assert.strictEqual(s.resolveTask(FC.id).task.status, 'landed');
+    assert.deepStrictEqual(await s.reverifyCommitted(), [], 'checked once');
+  }
   svn('revert', '-q', lt2Path);
   assert.strictEqual((await s.checkCommitted(FC.id)).status, 'active', 'everything reverted by hand: back to active, not committed');
   ok('commit detection: a removed/reverted file is not taken as committed');
@@ -431,6 +441,7 @@ async function main() {
   fs.writeFileSync(path.join(appDir, 'stray.txt'), 'user stray\r\n'); // unversioned file where the task adds one
   const before = R(spPath);
   const svnBefore = svn('status', appDir);
+  const stSet = (t = svn('status', appDir)) => t.split(/\r?\n/).filter((l) => l.trim()).sort();
 
   // cancel: the working copy comes back exactly
   const SC = await s.createTask(scope.id, { title: 'cancel me' });
@@ -440,9 +451,8 @@ async function main() {
   assert.strictEqual(R(spPath), crlf('s1\ns2\ns3 SC\ns4\ns5\ns6\ns7\ns8\ns9\ns10\n'), 'only this task in the working copy');
   const cancel = await s.endCommit(SC.id);
   assert(!cancel.committed && !cancel.kept.length && !cancel.errors.length, JSON.stringify(cancel));
-  if (svn('status', appDir) !== svnBefore) console.error('STATUS DIFF', JSON.stringify(cancel), '\nBEFORE\n' + svnBefore + '\nAFTER\n' + svn('status', appDir));
   assert.strictEqual(R(spPath), before);
-  assert.strictEqual(svn('status', appDir), svnBefore);
+  assert.deepStrictEqual(stSet(), stSet(svnBefore));
   assert.strictEqual(s.resolveTask(SC.id).task.status, 'active');
   ok('커밋 준비 → 취소: working copy (changes, changelists, unversioned file) back exactly as it was');
 
@@ -453,7 +463,7 @@ async function main() {
   await s.endCommit(Q1.id);
   assert.strictEqual(s.resolveTask(Q1.id).task.status, 'landed');
   assert.strictEqual(R(spPath), before);
-  assert.strictEqual(svn('status', appDir), svnBefore);
+  assert.deepStrictEqual(stSet(), stSet(svnBefore));
   ok('커밋 준비 of a task that has an old changelist → 취소: its changelist and status come back');
 
   // commit: same file as another changelist and the user's edit, no conflict anywhere
