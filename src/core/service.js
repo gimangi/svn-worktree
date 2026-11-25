@@ -564,6 +564,12 @@ class Service {
       reviews: reviews.map((r) => ({ at: r.at, reviewer: r.reviewer, verdict: r.verdict, summary: r.summary, comments: (r.comments || []).length })),
     };
     if (task.status === 'landed') res.commit = await this.commitHelp(scope, task);
+    if (task.status === 'committed') {
+      res.leftovers = checkSvn ? (await this.leftovers(task.id)).map((x) => x.path) : (task.leftovers || []);
+      if (checkSvn && JSON.stringify(res.leftovers) !== JSON.stringify(task.leftovers || [])) { task.leftovers = res.leftovers; this._saveTask(scope, task); }
+    }
+    Object.assign(res, this._order(scope, task));
+    if (task.status === 'active' || task.status === 'landed') res.occupants = this.wcOccupants(task.id);
     const marker = this._commitMarker(scope);
     if (marker) res.commitInProgress = { task: marker.task, at: marker.at, external: !!marker.external, mine: marker.task === task.id };
     return res;
@@ -695,6 +701,7 @@ class Service {
     return this._scopeLock(scope, `작업 #${task.no} SVN changelist 반영`, async () => {
       const { tip, base } = await this._range(scope, task);
       const changes = await git.nameStatus(base, tip);
+      const behind = Number(decode(await git.buf(['rev-list', '--count', `${base}..${BASE_REF}`])).trim()) || 0;
       const lastLanded = task.landed && task.landed.commit && (await git.revParse(task.landed.commit)) ? task.landed.commit : null;
       const prevFiles = new Set(task.landed ? task.landed.files : []);
       const finalFiles = new Set();
@@ -706,6 +713,7 @@ class Service {
       const candidates = new Set([...finalFiles, ...prevFiles]);
 
       const stList = await svn.status(scope.svnPath);
+      const byChangelist = new Map(this._listTaskFiles(scope).filter((o) => o.id !== task.id && o.changelist).map((o) => [o.changelist, o]));
       const st = new Map(stList.map((e) => [key(e.path), e]));
       const plan = [];
       // Case-only renames (usage.md -> USAGE.md, e.g. from `git mv`): on Windows both names are the same
@@ -744,7 +752,11 @@ class Service {
             item.action = 'overlap';
             item.reason = `사용자 changelist "${s.changelist}" 에 포함된 파일`;
           } else if (item.action === 'conflict') {
-            item.reason = `다른 작업(${s.changelist})과 같은 부분을 수정함`;
+            const owner = byChangelist.get(s.changelist);
+            item.reason = owner
+              ? `작업 #${owner.no} "${owner.title}" 과 같은 부분을 수정함 — #${owner.no} 를 먼저 SVN 커밋한 뒤 rebase`
+              : `다른 작업(${s.changelist})과 같은 부분을 수정함`;
+            if (owner) item.waitFor = owner.id;
           } else {
             // shared with another task: both changes live in the working copy, each task commits only its own part
             item.sharedWith = s.changelist;
@@ -752,6 +764,11 @@ class Service {
         }
         if (item.action === 'write' && ours !== null) {
           try { fs.accessSync(abs, fs.constants.W_OK); } catch (_) { item.action = 'conflict'; item.reason = '읽기 전용 파일 (svn:needs-lock 이면 먼저 svn lock 필요)'; }
+        }
+        if (item.action === 'conflict' && !item.waitFor && (!s || s.item === 'normal') && behind > 0 && /로컬 변경과 충돌/.test(item.reason || '')) {
+          // the working copy has no local edit here: the overlap is with what was committed to SVN since the task started
+          item.reason = 'SVN 에 새로 커밋된 변경과 같은 부분을 수정함 — 최신 SVN 기준으로 rebase 필요';
+          item.needsRebase = true;
         }
         plan.push(item);
       }
@@ -767,10 +784,23 @@ class Service {
       }
       const blocked = plan.filter((p) => p.action === 'conflict' || p.action === 'overlap');
       const summary = plan.map(({ path: p, action, merged, reason, svnStatus, moveFrom, sharedWith }) => ({ path: p, action, merged, reason, svnStatus, moveFrom, sharedWith }));
+      // commit order: which other tasks must be committed before this one can be landed
+      const waitIds = [...new Set(blocked.filter((b) => b.waitFor).map((b) => b.waitFor))];
+      const waitFor = waitIds.map((id) => {
+        const o = [...byChangelist.values()].find((x) => x.id === id);
+        return { id, no: o.no, title: o.title, status: o.status, files: blocked.filter((b) => b.waitFor === id).map((b) => b.path) };
+      });
+      const needsRebase = blocked.some((b) => b.needsRebase);
+      if (blocked.length && !force) {
+        if (waitFor.length) task.waitFor = { at: now(), tasks: waitFor.map(({ id, no, title, files }) => ({ id, no, title, files })) };
+        else delete task.waitFor;
+        this._saveTask(scope, task);
+      }
       if (dryRun || (blocked.length && !force)) {
         return {
           ok: blocked.length === 0, dryRun, task: task.id, changelist: task.changelist, files: summary,
-          blocked: blocked.map((b) => ({ path: b.path, reason: b.reason })),
+          blocked: blocked.map((b) => ({ path: b.path, reason: b.reason, waitFor: b.waitFor, needsRebase: b.needsRebase })),
+          waitFor, needsRebase,
           next: blocked.length
             ? '충돌을 해결해야 합니다: 다른 작업과 같은 줄을 고쳤다면 그 작업을 먼저 SVN 커밋한 뒤 svnwt_task_sync 로 rebase 하고, SVN working copy 의 로컬 수정과 겹치면 사용자에게 알리세요. force=true 는 충돌 파일을 건너뜁니다.'
             : (dryRun ? 'dryRun=false 로 다시 호출하면 SVN working copy 에 반영됩니다.' : undefined),
@@ -835,6 +865,8 @@ class Service {
       const prevDirs = (task.landed && task.landed.dirs) || [];
 
       task.status = 'landed';
+      delete task.waitFor;
+      delete task.readyAt;
       task.landed = {
         at: now(), commit: tip, base, revision: this.resolveScope(scope.id).revision, files: members, shared,
         dirs: [...new Set([...dirs, ...prevDirs.filter((d) => members.some((m) => m.startsWith(d + '/')))])].sort(),
@@ -934,6 +966,7 @@ class Service {
     this._saveTask(scope, task);
     if (committed) {
       await this._reassignShared(scope, task, svn);
+      await this._recordLeftovers(scope, task);
       try { await this.refreshScope(scope.id); } catch (_) { /* best effort */ }
     }
     return task.status;
@@ -973,6 +1006,164 @@ class Service {
   async checkCommitted(ref) {
     const { scope, task } = this.resolveTask(ref);
     return { task: task.id, status: await this._detectCommitted(scope, task) };
+  }
+
+  // ------------------------------------------------------------ commit order between tasks
+  /**
+   * waitFor: tasks that changed the same lines and hold the file in their changelist; this task can be
+   * landed once they are committed (or taken back out). waitingOnMe: active tasks waiting for this one.
+   */
+  _order(scope, task) {
+    const all = this._listTaskFiles(scope);
+    const res = {};
+    if (task.waitFor && task.status === 'active') {
+      const list = task.waitFor.tasks.map((w) => {
+        const o = all.find((x) => x.id === w.id);
+        const status = o ? o.status : 'removed';
+        return { id: w.id, no: w.no, title: w.title, files: w.files, status, ready: status !== 'landed' };
+      });
+      res.waitFor = list;
+      res.waitReady = list.every((w) => w.ready);
+    }
+    const waiting = all.filter((o) => o.id !== task.id && o.status === 'active' && o.waitFor && o.waitFor.tasks.some((w) => w.id === task.id));
+    if (waiting.length) res.waitingOnMe = waiting.map((o) => ({ id: o.id, no: o.no, title: o.title, files: o.waitFor.tasks.find((w) => w.id === task.id).files }));
+    return res;
+  }
+
+  /** Active tasks that were waiting for `ref` and can now be landed (all the tasks they waited for are no longer landed). */
+  unblockedBy(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const all = this._listTaskFiles(scope);
+    return all.filter((o) => o.status === 'active' && o.waitFor && o.waitFor.tasks.some((w) => w.id === task.id))
+      .filter((o) => o.waitFor.tasks.every((w) => { const x = all.find((y) => y.id === w.id); return !x || x.status !== 'landed'; }))
+      .map((o) => ({ id: o.id, no: o.no, title: o.title }));
+  }
+
+  // ------------------------------------------------------------ one changelist at a time
+  /**
+   * Other tasks that currently have changes in the SVN working copy: their changelists, and what a committed
+   * task left behind (files left out of its commit). The work itself is in git, so all of it can be dropped.
+   */
+  wcOccupants(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    return this._listTaskFiles(scope)
+      .filter((o) => o.id !== task.id && (o.status === 'landed' || (o.status === 'committed' && (o.leftovers || []).length)))
+      .map((o) => ({
+        id: o.id, no: o.no, title: o.title, status: o.status,
+        files: o.status === 'landed' ? ((o.landed && o.landed.files) || []).length : o.leftovers.length,
+        landedAt: (o.landed && o.landed.at) || '',
+      }));
+  }
+
+  /** Take every other task out of the SVN working copy (last landed first). Their branches are untouched. */
+  async clearWorkingCopy(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    this._assertNoCommitInProgress(scope);
+    const occ = this.wcOccupants(task.id).sort((a, b) => String(b.landedAt).localeCompare(String(a.landedAt)));
+    const cleared = [];
+    for (const o of occ) {
+      const r = o.status === 'landed' ? await this.unlandTask(o.id) : await this.discardLeftovers(o.id);
+      cleared.push({ id: o.id, no: o.no, title: o.title, status: o.status, conflicts: r.files.filter((f) => f.action === 'conflict').map((f) => f.path) });
+    }
+    return { task: task.id, cleared };
+  }
+
+  /**
+   * Changelist request from an agent (MCP / @svnwt). The SVN working copy holds one task changelist at a time and
+   * only the human replaces it (the one in it may be under review or being committed): when another task is in
+   * it, this task is only marked ready.
+   */
+  async requestChangelist(ref, opts = {}) {
+    const { scope, task } = this.resolveTask(ref);
+    const occ = this.wcOccupants(task.id);
+    if (opts.dryRun || !occ.length) return this.landTask(task.id, opts);
+    task.readyAt = now();
+    this._saveTask(scope, task);
+    const list = occ.map((o) => `#${o.no} "${o.title}"`).join(', ');
+    return {
+      ok: false, task: task.id, ready: true, occupiedBy: occ.map((o) => ({ id: o.id, no: o.no, title: o.title })),
+      message: `SVN 에 다른 작업(${list})이 반영돼 있어 changelist 를 만들지 않고 "리뷰 대기" 로 표시했습니다. 바꾸는 것은 사용자가 리뷰 화면에서 합니다.`,
+    };
+  }
+
+  // ------------------------------------------------------------ leftovers after a partial commit
+  /** Files still in this task's changelist although the task was committed (left out of the commit). */
+  async leftovers(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    if (task.status !== 'committed') return [];
+    const svn = await this.svn();
+    const PENDING = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
+    return (await svn.status(scope.svnPath))
+      .filter((e) => e.changelist === task.changelist && PENDING.includes(e.item))
+      .map((e) => ({ path: relPosix(scope.svnPath, e.path), item: e.item }));
+  }
+
+  async _recordLeftovers(scope, task) {
+    try {
+      const fresh = this.resolveTask(task.id).task;
+      fresh.leftovers = (await this.leftovers(task.id)).map((x) => x.path);
+      this._saveTask(scope, fresh);
+      task.leftovers = fresh.leftovers;
+    } catch (_) { /* informational only */ }
+  }
+
+  /**
+   * Throw away what is left of a committed task in the SVN working copy: only the task's own change is
+   * taken out (3-way); other changes in the same files (the user's edits, other tasks) stay. A file that
+   * ends up equal to the pristine copy is reverted; files the task added are un-added and deleted.
+   * The task's git branch still has the change (re-landable until the worktree is removed).
+   */
+  async discardLeftovers(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    if (task.status !== 'committed') throw new Error('SVN 커밋이 끝난 작업만 남은 변경을 버릴 수 있습니다.');
+    this._assertNoCommitInProgress(scope);
+    const git = await this.git(scope);
+    const svn = await this.svn();
+    return store.withLock(path.join(scope.home, 'lock'), async () => {
+      const left = await this.leftovers(task.id);
+      const results = [];
+      const revert = [];
+      const unlink = [];
+      const unlist = [];
+      for (const l of left) {
+        const abs = fromPosix(scope.svnPath, l.path);
+        const ours = readFileOrNull(abs);
+        const landedBlob = task.landed ? await git.blob(task.landed.commit, l.path) : null;
+        const baseBlob = task.landed ? await git.blob(task.landed.base, l.path) : null;
+        if (l.item === 'added') {
+          revert.push(abs);
+          if (ours !== null && (landedBlob === null || bufEq(ours, landedBlob))) { unlink.push(abs); results.push({ path: l.path, action: '추가 취소, 파일 삭제' }); }
+          else results.push({ path: l.path, action: '추가 취소 (내용이 달라 파일은 남김)' });
+          continue;
+        }
+        if (l.item === 'deleted' || l.item === 'missing') { revert.push(abs); results.push({ path: l.path, action: '삭제 취소' }); continue; }
+        const pristine = await svn.catBase(abs);
+        let content = ours;
+        if (landedBlob !== null && baseBlob !== null) {
+          const m = await this._merge3(scope, ours, landedBlob, baseBlob);
+          if (m.action === 'conflict') { results.push({ path: l.path, action: 'conflict', reason: m.reason }); continue; }
+          if (m.action === 'write') content = m.content;
+        } else if (pristine !== null) {
+          content = pristine;
+        }
+        if (pristine !== null && bufEq(content, pristine)) { revert.push(abs); results.push({ path: l.path, action: '원래대로 (revert)' }); }
+        else {
+          if (!bufEq(content, ours)) fs.writeFileSync(abs, content);
+          unlist.push(abs);
+          results.push({ path: l.path, action: '작업 변경만 제거 (다른 로컬 수정은 유지)' });
+        }
+      }
+      if (revert.length) await svn.withTargets(['revert'], revert, { okCodes: [1] });
+      for (const f of unlink) try { fs.unlinkSync(f); } catch (_) { /* ignore */ }
+      // svn revert keeps changelist membership: take reverted files out too
+      const off = unlist.concat(revert.filter((f) => !unlink.includes(f) && fs.existsSync(f)));
+      if (off.length) await svn.withTargets(['changelist', '--remove'], off, { okCodes: [1] });
+      const fresh = this.resolveTask(task.id).task;
+      fresh.leftovers = results.filter((r) => r.action === 'conflict').map((r) => r.path);
+      fresh.leftoversDiscardedAt = now();
+      this._saveTask(scope, fresh);
+      return { task: task.id, files: results };
+    }, { op: `작업 ${task.id} 남은 변경 버리기` });
   }
 
   // ------------------------------------------------------------ split commit (one task at a time)
@@ -1183,11 +1374,12 @@ class Service {
       task.committedAt = now();
       this._saveTask(scope, task);
       await this._reassignShared(scope, task, await this.svn());
+      await this._recordLeftovers(scope, task);
       try { await this.refreshScope(scope.id); } catch (_) { /* best effort */ }
     } else {
       store.touchEvents({ scope: scope.id, task: task.id, commit: 'cancelled' });
     }
-    return { task: task.id, committed, restored };
+    return { task: task.id, committed, restored, leftovers: committed ? (task.leftovers || []) : undefined };
   }
 
   /** Commits prepared but not finished (marker files). */

@@ -23,7 +23,17 @@ function writeJson(file, data) {
   ensureDir(path.dirname(file));
   const tmp = file + '.' + process.pid + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-  fs.renameSync(tmp, file);
+  // Windows: replacing a file another process (extension / MCP server) is reading at that moment fails
+  // with EPERM/EBUSY/EACCES. Readers hold it only for milliseconds: retry briefly.
+  for (let i = 0; ; i++) {
+    try { fs.renameSync(tmp, file); return; } catch (e) {
+      if (i >= 80 || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) {
+        try { fs.unlinkSync(tmp); } catch (_) { /* ignore */ }
+        throw e;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

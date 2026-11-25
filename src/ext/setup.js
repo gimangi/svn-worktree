@@ -80,6 +80,24 @@ function installInstructions(ctx, { force = false } = {}) {
   }
 }
 
+/** Stage 1: custom agents (SVN Task / SVN Review) next to the instructions file. */
+function installAgents(ctx, { force = false } = {}) {
+  const dir = userPromptsDir(ctx);
+  const res = [];
+  for (const f of require('../agent/customAgents').files) {
+    const file = path.join(dir, f.name);
+    try {
+      if (!force && fs.existsSync(file) && fs.readFileSync(file, 'utf8') === f.content) { res.push({ file, changed: false }); continue; }
+      store.ensureDir(dir);
+      fs.writeFileSync(file, f.content, 'utf8');
+      res.push({ file, changed: true });
+    } catch (e) {
+      res.push({ file, changed: false, error: e.message });
+    }
+  }
+  return res;
+}
+
 /** Write/merge %USERPROFILE%\.mcp.json (global MCP config read by Visual Studio 2022 17.14+ / 2026). */
 function exportVisualStudio(ctx) {
   const dest = deployServer(ctx);
@@ -99,4 +117,4 @@ function exportVisualStudio(ctx) {
   return { file, serverDir: dest, instructions: path.join(dest, 'copilot-instructions.md') };
 }
 
-module.exports = { nodeRuntime, toolEnv, applyToolEnv, deployServer, installInstructions, exportVisualStudio, userPromptsDir };
+module.exports = { nodeRuntime, toolEnv, applyToolEnv, deployServer, installInstructions, installAgents, exportVisualStudio, userPromptsDir };

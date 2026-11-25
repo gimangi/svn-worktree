@@ -64,6 +64,29 @@ class TaskTree {
           it.description = (STATUS_LABEL[t.status] || t.status) + (t.status === 'landed' && nFiles !== null ? ` · ${nFiles}파일` : '');
           it.iconPath = STATUS_ICON[t.status];
           it.contextValue = 'task.' + t.status;
+          if (t.status === 'active' && t.readyAt) it.description = '리뷰 대기';
+          if (t.status === 'active' && t.waitFor && t.waitFor.tasks.length) {
+            const pending = t.waitFor.tasks.filter((w) => { const o = tasks.find((x) => x.id === w.id); return o && o.status === 'landed'; });
+            it.description += pending.length ? ` · #${pending.map((w) => w.no).join(', #')} 커밋 후` : ' · rebase 후 반영';
+          }
+          if (t.status === 'landed' && tasks.some((o) => o.status === 'active' && o.waitFor && o.waitFor.tasks.some((w) => w.id === t.id))) it.description += ' · 먼저 커밋';
+          const nLeft = t.status === 'committed' && Array.isArray(t.leftovers) ? t.leftovers.length : 0;
+          if (nLeft) {
+            it.description += ` · 남은 변경 ${nLeft}`;
+            it.contextValue += '.leftovers';
+          }
+          const ag = t.agent && t.agent.state;
+          if (ag === 'running') {
+            it.iconPath = new vscode.ThemeIcon('loading~spin');
+            it.description = '에이전트 실행 중 · ' + it.description;
+            it.contextValue += '.running';
+          } else if (ag === 'waiting') {
+            it.iconPath = new vscode.ThemeIcon('bell-dot', new vscode.ThemeColor('charts.yellow'));
+            it.description = '승인 대기 · ' + it.description;
+            it.contextValue += '.running';
+          } else if (ag === 'error') {
+            it.description = '에이전트 오류 · ' + it.description;
+          }
           it.tooltip = new vscode.MarkdownString(`**#${t.no} ${t.title}**\n\n${t.description || ''}\n\n- 상태: ${STATUS_TEXT[t.status] || t.status}\n- 브랜치: \`${t.branch}\`\n- worktree: \`${t.workPath}\`\n- changelist: \`${t.changelist}\`\n- 생성: ${t.createdAt}`);
           it.command = { command: 'svnwt.openReview', title: '리뷰', arguments: [{ kind: 'task', task: t }, { preserveFocus: true }] };
           it.id = 'task:' + t.id + ':' + t.status;

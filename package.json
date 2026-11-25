@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -87,7 +87,7 @@
       },
       {
         "command": "svnwt.createTask",
-        "title": "새 작업",
+        "title": "새 작업 (직접)",
         "category": "SVN Worktree",
         "icon": "$(add)"
       },
@@ -127,6 +127,11 @@
         "icon": "$(checklist)"
       },
       {
+        "command": "svnwt.rebaseAndLand",
+        "title": "최신 SVN 기준으로 rebase 후 changelist 만들기",
+        "category": "SVN Worktree"
+      },
+      {
         "command": "svnwt.unland",
         "title": "SVN working copy에서 되돌리기",
         "category": "SVN Worktree"
@@ -146,6 +151,12 @@
         "command": "svnwt.cancelCommit",
         "title": "커밋 준비 취소 (되돌리기)",
         "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.discardLeftovers",
+        "title": "남은 변경 버리기 (커밋에서 빠진 파일)",
+        "category": "SVN Worktree",
+        "icon": "$(discard)"
       },
       {
         "command": "svnwt.copyCommitCommand",
@@ -198,10 +209,49 @@
         "command": "svnwt.exportVisualStudio",
         "title": "Visual Studio용 MCP 설정 내보내기",
         "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.agent.newTask",
+        "title": "새 작업 (에이전트에게 맡기기)",
+        "category": "SVN Worktree",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "svnwt.agent.instruct",
+        "title": "에이전트에게 지시…",
+        "category": "SVN Worktree",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "svnwt.agent.stop",
+        "title": "에이전트 중지",
+        "category": "SVN Worktree",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "svnwt.agent.openChat",
+        "title": "채팅에서 이어가기 (@svnwt)",
+        "category": "SVN Worktree",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "svnwt.agent.enableChatSessions",
+        "title": "Chat 세션 목록에 작업 표시 (실험)",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.locks",
+        "title": "잠금 상태 확인/해제",
+        "category": "SVN Worktree"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "svnwt.agent.newTask",
+          "when": "view == svnwt.tasks",
+          "group": "navigation@0"
+        },
         {
           "command": "svnwt.createTask",
           "when": "view == svnwt.tasks",
@@ -231,9 +281,49 @@
           "command": "svnwt.exportVisualStudio",
           "when": "view == svnwt.tasks",
           "group": "z@3"
+        },
+        {
+          "command": "svnwt.agent.enableChatSessions",
+          "when": "view == svnwt.tasks",
+          "group": "z@4"
+        },
+        {
+          "command": "svnwt.locks",
+          "when": "view == svnwt.tasks",
+          "group": "z@0"
         }
       ],
       "view/item/context": [
+        {
+          "command": "svnwt.agent.newTask",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "inline@0"
+        },
+        {
+          "command": "svnwt.agent.newTask",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "1@0"
+        },
+        {
+          "command": "svnwt.agent.stop",
+          "when": "view == svnwt.tasks && viewItem =~ /\\.running$/",
+          "group": "inline@0"
+        },
+        {
+          "command": "svnwt.agent.instruct",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(active|landed)$/",
+          "group": "0@1"
+        },
+        {
+          "command": "svnwt.agent.openChat",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(active|landed)/",
+          "group": "0@2"
+        },
+        {
+          "command": "svnwt.agent.stop",
+          "when": "view == svnwt.tasks && viewItem =~ /\\.running$/",
+          "group": "0@3"
+        },
         {
           "command": "svnwt.createTask",
           "when": "view == svnwt.tasks && viewItem == scope",
@@ -261,28 +351,23 @@
         },
         {
           "command": "svnwt.land",
-          "when": "view == svnwt.tasks && viewItem == task.active",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.active/",
           "group": "inline@1"
         },
         {
           "command": "svnwt.commitSvn",
-          "when": "view == svnwt.tasks && viewItem == task.landed",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.landed/",
           "group": "inline@1"
         },
         {
           "command": "svnwt.removeTask",
-          "when": "view == svnwt.tasks && viewItem == task.committed",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.committed/",
           "group": "inline@1"
         },
         {
           "command": "svnwt.openReview",
           "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
           "group": "1@1"
-        },
-        {
-          "command": "svnwt.openReviewNewTab",
-          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
-          "group": "1@1b"
         },
         {
           "command": "svnwt.openChanges",
@@ -301,18 +386,23 @@
         },
         {
           "command": "svnwt.commitSvn",
-          "when": "view == svnwt.tasks && viewItem == task.landed",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.landed/",
           "group": "2@2"
         },
         {
           "command": "svnwt.syncTask",
-          "when": "view == svnwt.tasks && viewItem == task.active",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.active/",
           "group": "2@3"
         },
         {
           "command": "svnwt.unland",
-          "when": "view == svnwt.tasks && viewItem == task.landed",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.landed/",
           "group": "2@4"
+        },
+        {
+          "command": "svnwt.discardLeftovers",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.committed\\.leftovers/",
+          "group": "2@5"
         },
         {
           "command": "svnwt.openWorktree",
@@ -358,7 +448,7 @@
           "when": "false"
         },
         {
-          "command": "svnwt.openReviewNewTab",
+          "command": "svnwt.agent.stop",
           "when": "false"
         }
       ]
@@ -407,8 +497,78 @@
           ],
           "default": "prepare",
           "description": "\"SVN 커밋…\" 동작. 어느 방법이든 이 작업의 변경만 커밋되도록 다른 변경은 잠시 빼 두었다가 되돌립니다."
+        },
+        "svnwt.agent.model": {
+          "type": "string",
+          "default": "",
+          "description": "백그라운드 에이전트가 쓸 Copilot 모델 (id/family 일부, 예: claude-sonnet, gpt-4.1). 비우면 자동 선택. 채팅(@svnwt)에서는 채팅 창에서 고른 모델을 씁니다."
+        },
+        "svnwt.agent.commandApproval": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "명령마다 확인 (작업별 \"항상 허용\" 가능)",
+            "확인 없이 실행 (worktree 안, svn 쓰기 명령은 항상 차단)"
+          ],
+          "default": "ask",
+          "description": "에이전트의 run_command 실행 승인 방식"
+        },
+        "svnwt.agent.newFileEol": {
+          "type": "string",
+          "enum": [
+            "crlf",
+            "lf"
+          ],
+          "default": "crlf",
+          "description": "에이전트가 새로 만드는 파일의 줄바꿈 (기존 파일은 원래 형식 유지)"
+        },
+        "svnwt.agent.chatSessions": {
+          "type": "boolean",
+          "default": false,
+          "description": "(실험) VS Code Chat 세션 목록에 svnwt 작업을 표시. VS Code 제안 API 가 필요해 \"SVN Worktree: Chat 세션 목록에 작업 표시 (실험)\" 명령으로 켭니다."
         }
       }
-    }
+    },
+    "chatParticipants": [
+      {
+        "id": "svnwt.agent",
+        "name": "svnwt",
+        "fullName": "SVN Worktree",
+        "description": "작업별 worktree 에서 일하는 에이전트 (한 대화 = 한 작업)",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "new",
+            "description": "새 작업으로 시작"
+          },
+          {
+            "name": "continue",
+            "description": "기존 작업 이어가기: /continue <번호> <지시>"
+          },
+          {
+            "name": "tasks",
+            "description": "작업 목록"
+          }
+        ]
+      }
+    ],
+    "chatSessions": [
+      {
+        "type": "svnwt-session",
+        "name": "svnwt",
+        "displayName": "SVN Worktree 작업",
+        "description": "svnwt 작업별 에이전트 세션"
+      }
+    ]
+  },
+  "enabledApiProposals": [
+    "chatSessionsProvider"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gimangi/svn-worktree"
   }
 }

@@ -10,11 +10,13 @@ const { TaskTree } = require('./tree');
 const { GitFs, SCHEME } = require('./gitfs');
 const { ReviewPanel } = require('./review');
 const setup = require('./setup');
+const { setupAgent } = require('./agentUi');
 
 let service;
 let tree;
 let output;
 let mcpRegistered = false;
+let agent = null; // { runner, runBackground }
 
 function log(msg) { if (output) output.appendLine(`[${new Date().toLocaleTimeString()}] ${msg}`); }
 
@@ -335,6 +337,23 @@ function registerCommands(ctx) {
       if (!a) return;
       autoCommit = a === '커밋 후 진행';
     }
+    // One changelist at a time: drop what other tasks have in the SVN working copy (their work stays in git).
+    const occ = service.wcOccupants(t.id);
+    let switched = false;
+    if (occ.length) {
+      const a = await vscode.window.showWarningMessage(`changelist 를 #${t.no} "${t.title}" 로 바꿀까요?`, {
+        modal: true,
+        detail: `SVN working copy 에서 아래 변경을 버립니다.\n\n${
+          occ.map((o) => `· #${o.no} "${o.title}" — ${o.status === 'landed' ? `파일 ${o.files}개` : `커밋 후 남은 파일 ${o.files}개`}`).join('\n')
+        }\n\n작업 내용은 git 에 남아 있어 다시 만들 수 있습니다. 직접 고친 내용은 그대로 둡니다.`,
+      }, '바꾸기');
+      if (a !== '바꾸기') return undefined;
+      const c = await withProgress('기존 changelist 버리는 중…', () => service.clearWorkingCopy(t.id));
+      refreshAll();
+      const kept = c.cleared.filter((x) => x.conflicts.length);
+      if (kept.length) vscode.window.showWarningMessage(`직접 고친 내용과 겹쳐 남겨 둔 파일: ${kept.map((x) => `#${x.no} ${x.conflicts.join(', ')}`).join(' / ')}`);
+      switched = true;
+    }
     const plan = await withProgress('SVN working copy 반영 내용 확인 중…', () => service.landTask(t.id, { dryRun: true, autoCommit }));
     const count = (a) => plan.files.filter((f) => f.action === a).length;
     const summary = [
@@ -347,20 +366,29 @@ function registerCommands(ctx) {
     let force = false;
     if (plan.blocked.length) {
       const applicable = count('write') + count('delete') + count('move-source');
-      const localEdit = plan.blocked.some((b) => /로컬 변경|읽기 전용/.test(b.reason || ''));
-      const overlap = plan.blocked.some((b) => /changelist/.test(b.reason || ''));
+      const localEdit = plan.blocked.some((b) => !b.waitFor && !b.needsRebase && /로컬 변경|읽기 전용/.test(b.reason || ''));
+      const userCl = plan.blocked.some((b) => /사용자 changelist/.test(b.reason || ''));
+      const waitFor = plan.waitFor || [];
       const tips = [];
+      if (waitFor.length) {
+        tips.push(`커밋 순서: ${waitFor.map((w) => `#${w.no} "${w.title}"`).join(', ')} → #${t.no}`);
+        tips.push(`${waitFor.map((w) => `#${w.no}`).join(', ')} 를 먼저 SVN 커밋하세요. 커밋되면 알려 드리고, 그때 "rebase 후 changelist 만들기" 로 이어서 진행하면 됩니다 (같은 줄 충돌은 rebase 할 때 worktree 에서 정리).`);
+      }
+      if (plan.needsRebase) tips.push('SVN 에 새로 커밋된 내용과 겹칩니다. "최신 SVN 기준으로 rebase" 후 다시 만드세요.');
       if (localEdit) tips.push('SVN working copy 에서 같은 파일을 직접 고친 내용과 겹칩니다. 그 수정을 먼저 커밋하거나 되돌린 뒤 다시 시도하세요.');
-      if (overlap) tips.push('다른 작업의 changelist 에 이미 들어 있는 파일입니다. 그 작업을 먼저 SVN 에 커밋한 뒤 "최신 SVN 기준으로 rebase" 하세요.');
+      if (userCl) tips.push('직접 만든 changelist 에 들어 있는 파일입니다. 그 changelist 에서 파일을 뺀 뒤 다시 시도하세요.');
       const buttons = [];
+      if (waitFor.length) buttons.push(`#${waitFor[0].no} 리뷰 열기`);
       if (applicable) buttons.push('충돌 파일 빼고 반영');
-      if (overlap || !info.baseIsLatest) buttons.push('최신 SVN 기준으로 rebase');
+      if (plan.needsRebase || (!waitFor.length && !info.baseIsLatest)) buttons.push('최신 SVN 기준으로 rebase');
+      refreshAll();
       const a = await vscode.window.showWarningMessage(`#${t.no}: SVN working copy 에 반영할 수 없는 파일이 ${plan.blocked.length}개 있습니다.`,
         { modal: true, detail: [...lines, '', ...tips].join('\n') }, ...buttons);
-      if (a === '최신 SVN 기준으로 rebase') return vscode.commands.executeCommand('svnwt.syncTask', t.id);
+      if (a === '최신 SVN 기준으로 rebase') return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
+      if (waitFor.length && a === `#${waitFor[0].no} 리뷰 열기`) return vscode.commands.executeCommand('svnwt.openReview', waitFor[0].id);
       if (a !== '충돌 파일 빼고 반영') return undefined;
       force = true;
-    } else {
+    } else if (!switched) {
       const a = await vscode.window.showInformationMessage(`#${t.no} 변경을 SVN working copy 에 반영하고 changelist "${t.changelist}" 로 묶을까요?`,
         { modal: true, detail: `${summary}\n\n${lines.join('\n')}` }, '반영');
       if (a !== '반영') return undefined;
@@ -372,6 +400,22 @@ function registerCommands(ctx) {
     if (a === 'SVN 커밋…') vscode.commands.executeCommand('svnwt.commitSvn', t.id);
     if (a === '명령 복사') vscode.commands.executeCommand('svnwt.copyCommitCommand', t.id);
     return undefined;
+  });
+
+  reg('svnwt.rebaseAndLand', async (arg) => {
+    const t = await pickTask(arg, (x) => x.status === 'active');
+    if (!t) return undefined;
+    const r = await withProgress(`#${t.no} 최신 SVN 기준으로 rebase 중…`, () => service.syncTask(t.id, {}));
+    refreshAll();
+    if (!r.ok) {
+      const a = await vscode.window.showWarningMessage(`#${t.no}: rebase 중 같은 줄 충돌 ${r.conflicts.length}개 — ${r.conflicts.slice(0, 5).join(', ')}. worktree 에서 정리한 뒤 다시 "changelist 만들기" 를 누르세요.`,
+        'Copilot에게 해결 요청', 'worktree 열기', '취소(abort)');
+      if (a === '취소(abort)') { await service.syncTask(t.id, { abort: true }); refreshAll(); }
+      if (a === 'worktree 열기') vscode.commands.executeCommand('svnwt.openWorktree', t.id);
+      if (a === 'Copilot에게 해결 요청') await openChat(`svnwt 작업 ${t.id} 의 rebase 충돌을 worktree(${t.workPath})에서 해결하고 svnwt_task_sync(cont=true)로 계속해줘. 충돌 파일: ${r.conflicts.join(', ')}`, true);
+      return undefined;
+    }
+    return vscode.commands.executeCommand('svnwt.land', t.id);
   });
 
   reg('svnwt.unland', async (arg) => {
@@ -394,6 +438,28 @@ function registerCommands(ctx) {
     if (watching && watching.task === t.id) stopWatching();
     const res = await withProgress(`#${t.no} 커밋 준비를 되돌리는 중…`, () => service.endCommit(t.id));
     await afterCommit(t, res, '');
+  });
+
+  reg('svnwt.discardLeftovers', async (arg) => {
+    const t = await pickTask(arg, (x) => x.status === 'committed');
+    if (!t) return;
+    const left = await service.leftovers(t.id);
+    if (!left.length) {
+      vscode.window.showInformationMessage(`#${t.no} 의 changelist 에 남은 변경이 없습니다.`);
+      refreshAll();
+      return;
+    }
+    const list = left.slice(0, 15).map((x) => `· ${x.path}${x.item === 'added' ? ' (새 파일)' : x.item === 'deleted' || x.item === 'missing' ? ' (삭제)' : ''}`).join('\n');
+    const a = await vscode.window.showWarningMessage(
+      `커밋에서 빠진 변경 ${left.length}개를 버릴까요?`,
+      { modal: true, detail: `${list}${left.length > 15 ? `\n… 외 ${left.length - 15}개` : ''}\n\n이 작업의 변경만 되돌립니다. 같은 파일의 다른 수정과 git 브랜치는 그대로입니다.` },
+      '버리기');
+    if (a !== '버리기') return;
+    const r = await withProgress(`#${t.no} 남은 변경을 버리는 중…`, () => service.discardLeftovers(t.id));
+    refreshAll();
+    const c = r.files.filter((f) => f.action === 'conflict');
+    if (c.length) vscode.window.showWarningMessage(`남은 변경을 버렸습니다. 다른 수정과 겹쳐 직접 확인해야 하는 파일: ${c.map((x) => x.path).join(', ')}`);
+    else vscode.window.showInformationMessage(`#${t.no} 남은 변경 ${r.files.length}개를 버렸습니다.`);
   });
 
   reg('svnwt.copyCommitCommand', async (arg) => {
@@ -428,6 +494,17 @@ function registerCommands(ctx) {
       const a = await vscode.window.showWarningMessage(`#${t.no} 의 changelist가 아직 SVN에 커밋되지 않았습니다. worktree만 삭제하고 SVN working copy의 변경은 그대로 둘까요?`, { modal: true }, '삭제');
       if (a !== '삭제') return;
       force = true;
+    } else if (t.status === 'committed' && (await service.leftovers(t.id).catch(() => [])).length) {
+      const n = (await service.leftovers(t.id)).length;
+      const a = await vscode.window.showWarningMessage(`커밋에서 빠진 변경 ${n}개가 남아 있습니다. 같이 버릴까요?`,
+        { modal: true, detail: '버리면 이 작업의 변경만 SVN working copy 에서 되돌립니다.' },
+        '버리고 삭제', '그대로 두고 삭제');
+      if (!a) return;
+      if (a === '버리고 삭제') {
+        const r = await withProgress(`#${t.no} 남은 변경을 버리는 중…`, () => service.discardLeftovers(t.id));
+        const c = r.files.filter((f) => f.action === 'conflict');
+        if (c.length) vscode.window.showWarningMessage(`직접 확인해야 하는 파일: ${c.map((x) => x.path).join(', ')}`);
+      }
     } else {
       const a = await vscode.window.showWarningMessage(`#${t.no} "${t.title}" worktree와 브랜치를 삭제할까요?`, { modal: true }, '삭제');
       if (a !== '삭제') return;
@@ -478,6 +555,7 @@ async function commitTaskToSvn(t, mode) {
   }
   const e = await env.detect();
   mode = mode || vscode.workspace.getConfiguration('svnwt').get('commitTool') || 'prepare';
+  if (mode === 'external') mode = 'prepare'; // value used by 0.3.0
   if (mode === 'tortoise' && !e.tortoiseProc) mode = 'vscode';
   const split = plan.setAside.length > 0;
   if (mode === 'ask') {
@@ -591,10 +669,30 @@ function stopWatching() {
   watching = null;
 }
 
+/** After `t` was committed: tasks that waited for it (same lines) can now be rebased and landed. */
+async function offerUnblocked(t) {
+  let list = [];
+  try { list = service.unblockedBy(t.id); } catch (_) { return; }
+  if (!list.length) return;
+  const names = list.map((x) => `#${x.no} "${x.title}"`).join(', ');
+  const a = await vscode.window.showInformationMessage(`#${t.no} 가 커밋되어 ${names} 를 이어서 진행할 수 있습니다 (rebase 후 changelist 만들기).`,
+    list.length === 1 ? `#${list[0].no} rebase 후 changelist 만들기` : '리뷰 열기');
+  if (!a) return;
+  if (list.length === 1) vscode.commands.executeCommand('svnwt.rebaseAndLand', list[0].id);
+  else vscode.commands.executeCommand('svnwt.openReview', list[0].id);
+}
+
 async function afterCommit(t, res, output) {
   refreshAll();
+  if (res && res.committed) offerUnblocked(t);
   if (res && res.committed) {
     const m = /Committed revision (\d+)/i.exec(output || '') || /revision (\d+)/i.exec(output || '');
+    const left = (res.leftovers || []).length;
+    if (left) {
+      const a = await vscode.window.showInformationMessage(`#${t.no} "${t.title}" SVN 커밋 완료${m ? ` (r${m[1]})` : ''}. 커밋에서 빠진 변경 ${left}개가 changelist 에 남아 있습니다.`, '남은 변경 버리기', '나중에');
+      if (a === '남은 변경 버리기') vscode.commands.executeCommand('svnwt.discardLeftovers', t.id);
+      return;
+    }
     const a = await vscode.window.showInformationMessage(`#${t.no} "${t.title}" SVN 커밋 완료${m ? ` (r${m[1]})` : ''}. worktree 를 정리할까요?`, '정리', '나중에');
     if (a === '정리') vscode.commands.executeCommand('svnwt.removeTask', t.id);
   } else if (output) {
@@ -614,7 +712,69 @@ async function openChat(query) {
   }
 }
 
-const ctxApi = { get service() { return service; }, openTaskFile };
+const ctxApi = {
+  get service() { return service; },
+  openTaskFile,
+  isAgentRunning: (id) => !!(agent && agent.runner.isRunning(id)),
+};
+
+// ------------------------------------------------------------------ agent extras
+/** Stage 3 needs the proposed chat sessions API: turn it on in argv.json (backup kept). */
+function registerAgentCommands(ctx) {
+  ctx.subscriptions.push(vscode.commands.registerCommand('svnwt.locks', async () => {
+    const locks = service.locks();
+    const snaps = service.listScopes().filter((s) => s.lastSnapshot)
+      .map((s) => `${s.id}: 마지막 SVN 기준 읽기 ${Math.round(s.lastSnapshot.totalMs / 1000)}초 (파일 ${s.lastSnapshot.files}개, svn status ${Math.round((s.lastSnapshot.svnStatusMs || 0) / 1000)}초, 해시 ${Math.round((s.lastSnapshot.hashFilesMs || 0) / 1000)}초)`);
+    if (!locks.length) {
+      vscode.window.showInformationMessage(`걸려 있는 잠금이 없습니다.${snaps.length ? '\n' + snaps.join('\n') : ''}`);
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(locks.map((l) => ({
+      label: `${l.stale ? '$(warning) 남은 잠금' : '$(sync~spin) 진행 중'} · ${l.op}`,
+      description: `${l.scope || '전체'} · ${store.fmtDuration(l.since)}째 · pid ${l.pid || '?'}${l.alive === false ? ' (종료됨)' : ''}`,
+      detail: l.lockDir, l,
+    })), { placeHolder: '해제할 잠금 선택 (남은 잠금은 바로 해제, 진행 중인 작업은 확인 후 강제 해제)' });
+    if (!pick) return;
+    let force = false;
+    if (!pick.l.stale) {
+      const a = await vscode.window.showWarningMessage(`"${pick.l.op}" 이(가) 아직 진행 중입니다 (pid ${pick.l.pid}). 강제로 해제하면 동시에 실행되어 결과가 꼬일 수 있습니다.`, { modal: true }, '강제 해제');
+      if (a !== '강제 해제') return;
+      force = true;
+    }
+    const r = service.releaseLock(pick.l.lockDir, { force });
+    vscode.window.showInformationMessage(r.released ? '잠금을 해제했습니다.' : r.reason);
+  }));
+
+  ctx.subscriptions.push(vscode.commands.registerCommand('svnwt.agent.enableChatSessions', async () => {
+    const argv = path.join(os.homedir(), '.vscode', 'argv.json');
+    const id = ctx.extension.id;
+    const ok = await vscode.window.showWarningMessage('Chat 세션 목록에 svnwt 작업을 표시합니다 (실험 기능).', {
+      modal: true,
+      detail: `VS Code 제안 API(chatSessionsProvider)를 이 확장에 허용하도록 ${argv} 에 "enable-proposed-api": ["${id}"] 를 추가하고, 설정 svnwt.agent.chatSessions 를 켭니다. 기존 파일은 argv.json.svnwt-backup 으로 보관합니다. 적용하려면 VS Code 를 완전히 종료 후 다시 시작해야 합니다. VS Code 버전에 따라 동작하지 않을 수 있습니다.`,
+    }, '켜기');
+    if (ok !== '켜기') return;
+    let text = fs.existsSync(argv) ? fs.readFileSync(argv, 'utf8') : '{\n}\n';
+    if (fs.existsSync(argv)) fs.copyFileSync(argv, argv + '.svnwt-backup');
+    if (!text.includes(`"${id}"`)) {
+      const m = /"enable-proposed-api"\s*:\s*\[/.exec(text);
+      if (m) {
+        const at = m.index + m[0].length;
+        const empty = /^\s*\]/.test(text.slice(at));
+        text = text.slice(0, at) + `"${id}"` + (empty ? '' : ', ') + text.slice(at);
+      } else {
+        const end = text.lastIndexOf('}');
+        if (end < 0) throw new Error(`${argv} 형식을 알 수 없습니다.`);
+        const body = text.slice(0, end).replace(/\s+$/, '');
+        const needsComma = /[^{,\s]$/.test(body.replace(/\/\/[^\n]*$/gm, '').replace(/\s+$/, ''));
+        text = `${body}${needsComma ? ',' : ''}\n\t"enable-proposed-api": ["${id}"]\n}\n`;
+      }
+      fs.mkdirSync(path.dirname(argv), { recursive: true });
+      fs.writeFileSync(argv, text, 'utf8');
+    }
+    await vscode.workspace.getConfiguration('svnwt').update('agent.chatSessions', true, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage('적용하려면 VS Code 를 모두 닫고 다시 실행하세요.', '파일 열기').then((a) => { if (a) vscode.window.showTextDocument(vscode.Uri.file(argv)); });
+  }));
+}
 
 // ------------------------------------------------------------------ MCP
 function registerMcp(ctx) {
@@ -678,7 +838,10 @@ function watchEvents(ctx) {
     checking = true;
     try {
       for (const t of service.listTasks().filter((x) => x.status === 'landed')) {
-        try { await service.checkCommitted(t.id); } catch (_) { /* svn busy etc. */ }
+        try {
+          const r = await service.checkCommitted(t.id);
+          if (r.status === 'committed') { refreshAll(); offerUnblocked(t); }
+        } catch (_) { /* svn busy etc. */ }
       }
     } finally { checking = false; }
   }, 60000);
@@ -710,10 +873,25 @@ function statusBar(ctx) {
   update();
 }
 
+/** Settings written by older versions -> current names (upgrade without user action). */
+async function migrateSettings() {
+  const cfg = vscode.workspace.getConfiguration('svnwt');
+  const i = cfg.inspect('commitTool') || {};
+  // user settings only: workspace settings may live inside the SVN working copy (.vscode/settings.json)
+  // and must not be modified; the old value there is still understood by the code.
+  const targets = [['globalValue', vscode.ConfigurationTarget.Global]];
+  for (const [k, target] of targets) {
+    if (i[k] === 'external') {
+      try { await cfg.update('commitTool', 'prepare', target); log(`설정 svnwt.commitTool: external -> prepare (${k})`); } catch (e) { log(`설정 변환 실패: ${e.message}`); }
+    }
+  }
+}
+
 async function activate(ctx) {
   output = vscode.window.createOutputChannel('SVN Worktree');
   ctx.subscriptions.push(output);
   setup.applyToolEnv();
+  migrateSettings().catch((e) => log(`migrate: ${e.message}`));
   service = new Service();
 
   tree = new TaskTree(service);
@@ -744,9 +922,28 @@ async function activate(ctx) {
     const r = setup.installInstructions(ctx);
     if (r.changed) log(`Copilot 지침 설치: ${r.file}`);
     if (r.error) log(`Copilot 지침 설치 실패: ${r.error}`);
+    for (const a of setup.installAgents(ctx)) {
+      if (a.changed) log(`커스텀 에이전트 설치: ${a.file}`);
+      if (a.error) log(`커스텀 에이전트 설치 실패: ${a.error}`);
+    }
   }
+
+  // svnwt agent: background runs, @svnwt chat participant, optional chat sessions list
+  const agentReady = setupAgent(ctx, {
+    service, log, refreshAll,
+    addToWorkspace: (t) => (workspaceHas(t.workPath) >= 0 ? false : addToWorkspace(t)),
+    pickTask,
+    pickScopeFor: async () => {
+      const scopes = service.listScopes();
+      if (!scopes.length) return null;
+      try { return await pickScope(); } catch (_) { return null; }
+    },
+    openReview: (id) => ReviewPanel.show(ctxApi, id),
+  }).then((a) => { agent = a; return a; }, (e) => { log(`agent: ${e && e.stack}`); return null; });
+  registerAgentCommands(ctx);
+
   log(`활성화됨 (MCP: ${path.join(ctx.extensionPath, 'src', 'mcp', 'server.js')})`);
-  return { service, tree, mcpRegistered };
+  return { service, tree, mcpRegistered, agentReady };
 }
 
 function deactivate() {}

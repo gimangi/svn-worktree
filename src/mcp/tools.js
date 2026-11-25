@@ -107,14 +107,14 @@ const TOOLS = [
   },
   {
     name: 'svnwt_task_changelist',
-    description: 'Finish a task: 3-way apply its committed changes onto the SVN working copy and group the files into SVN changelist "svnwt-<id>" (svn add/delete/move included). Files another task already changed are applied as shared files (both changes kept, committed separately later). Does NOT commit — the human commits from the SVN Worktree panel. Run again after more commits to update the changelist.',
+    description: 'Finish a task: 3-way apply its committed changes onto the SVN working copy and group the files into SVN changelist "svnwt-<id>" (svn add/delete/move included). The SVN working copy holds ONE task changelist at a time: if another task is in it, nothing is applied and the task is marked ready for review (ready=true) — the human switches it from the SVN Worktree panel. Does NOT commit. Run again after more commits to update the changelist.',
     inputSchema: {
       type: 'object', required: ['task'], properties: {
         task: TASK, dryRun: bool('Only report what would happen.'), autoCommit: bool('Commit uncommitted worktree changes first.'),
         force: bool('Skip conflicting files instead of stopping.'),
       },
     },
-    handler: (svc, a) => svc.landTask(a.task, { dryRun: !!a.dryRun, autoCommit: !!a.autoCommit, force: !!a.force }),
+    handler: (svc, a) => svc.requestChangelist(a.task, { dryRun: !!a.dryRun, autoCommit: !!a.autoCommit, force: !!a.force }),
   },
   {
     name: 'svnwt_task_unland',

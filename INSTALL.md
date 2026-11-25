@@ -16,10 +16,10 @@ Git / SVN 이 PATH 나 기본 위치에 없으면 설정 `svnwt.gitPath`, `svnwt
 ## 설치
 
 ```powershell
-code --install-extension svn-worktree-0.3.1.vsix
+code --install-extension svn-worktree-0.4.0.vsix
 ```
 
-또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.3.1.vsix`. 설치 후 VS Code 를 재시작합니다.
+또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.4.0.vsix`. 설치 후 VS Code 를 재시작합니다.
 
 > **주의**: `.vsix` 파일을 더블클릭하면 Visual Studio 의 *VSIX Installer* 가 열립니다 ("올바른 VSIX 패키지가 아닙니다" 등). 이 확장은 VS Code 용이므로 위 두 방법 중 하나로 **VS Code 에서** 설치하세요.
 의존 패키지가 없어 오프라인 환경에서도 그대로 설치됩니다.
@@ -42,15 +42,22 @@ code --install-extension svn-worktree-0.3.1.vsix
 |---|---|
 | `<SVN working copy>.svnwt\<scope>\` (working copy 옆) | git 저장소(`repo.git`), 작업별 worktree(`wt\`), 작업 기록 |
 | `%LOCALAPPDATA%\svnwt\` | scope 목록, MCP 서버 사본(Visual Studio 연동용) |
-| `%APPDATA%\Code\User\prompts\svnwt.instructions.md` | Copilot 지침 (설정 `svnwt.installCopilotInstructions` 로 끌 수 있음) |
+| `%APPDATA%\Code\User\prompts\svnwt.instructions.md`, `svnwt-task.agent.md`, `svnwt-review.agent.md` | Copilot 지침과 커스텀 에이전트 (설정 `svnwt.installCopilotInstructions` 로 끌 수 있음) |
 
 SVN working copy 안에는 아무것도 만들지 않습니다 (`.git` 없음).
 
 ## 보안 참고
 
 - 확장은 네트워크 통신을 하지 않습니다. Git / SVN 이 없을 때 안내 버튼을 누르면 설치 페이지를 브라우저로 여는 것이 전부입니다.
-- `svn commit` 은 사람이 커밋할 때만 실행됩니다 (Copilot 도구에는 커밋 기능이 없음).
-- 소스: `svnwt-0.3.1-source.zip` (JavaScript, 빌드 단계·외부 패키지 없음). 체크섬: `SHA256SUMS.txt`.
+- `svn commit` 은 사람이 커밋할 때만 실행됩니다 (Copilot 도구·@svnwt 에이전트에는 SVN 커밋 기능이 없고, svn 쓰기 명령은 차단).
+- @svnwt 에이전트는 VS Code 의 Copilot 언어 모델 API(`vscode.lm`)만 사용합니다. 별도 서버·키가 필요 없습니다.
+- 소스: `svnwt-0.4.0-source.zip` (JavaScript, 빌드 단계·외부 패키지 없음). 체크섬: `SHA256SUMS.txt`.
+
+## 문제 해결
+
+- **"잠금 대기 시간 초과"**: 같은 scope 에서 오래 걸리는 작업(SVN 기준 읽기, changelist 반영)이 진행 중이라는 뜻입니다. 메시지에 진행 중인 작업과 경과 시간이 나옵니다.
+  진행 중인 작업이 없는데 계속되면 명령 *SVN Worktree: 잠금 상태 확인/해제* 로 남은 잠금을 해제하세요 (VS Code 가 비정상 종료돼 남은 잠금은 0.3.3 부터 자동으로 풀립니다).
+- **느린 SVN 기준 읽기**: *잠금 상태 확인/해제* 에 마지막 기준 읽기의 단계별 시간(svn status, 파일 해시)이 표시됩니다. scope 를 작업에 필요한 폴더로 좁히면 빨라집니다.
 
 ## 제거
 

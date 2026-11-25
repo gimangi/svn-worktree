@@ -278,6 +278,111 @@ async function main() {
   assert(/^M\s+.*other\.txt$/m.test(svn('status', appDir)) && !clOf('other.txt'), 'user local edit untouched');
   ok('external commit tool: only X checked by default, X committed alone, everything else restored');
 
+  // ---------------------------------------------------------------- commit order: same lines in two tasks
+  const ordPath = path.join(appDir, 'ord.txt');
+  W(ordPath, crlf('o1\no2\no3\no4\no5\no6\n'));
+  svn('add', '-q', ordPath);
+  svn('commit', '-q', '-m', 'add ord', ordPath);
+  await s.refreshScope(scope.id);
+  const OA = await s.createTask(scope.id, { title: 'order A' });
+  const OB = await s.createTask(scope.id, { title: 'order B' });
+  { const f = path.join(OA.workPath, 'ord.txt'); fs.writeFileSync(f, R(f).replace('o3\r\n', 'o3 A\r\n')); }
+  { const f = path.join(OB.workPath, 'ord.txt'); fs.writeFileSync(f, R(f).replace('o3\r\n', 'o3 B\r\n')); }
+  await s.commitTask(OA.id, 'order A');
+  await s.commitTask(OB.id, 'order B');
+  assert((await s.landTask(OA.id)).ok);
+  const ob1 = await s.landTask(OB.id);
+  assert(!ob1.ok && ob1.waitFor.length === 1 && ob1.waitFor[0].id === OA.id, JSON.stringify(ob1));
+  assert(new RegExp(`#${OA.no} "order A"`).test(ob1.blocked[0].reason), ob1.blocked[0].reason);
+  let ibB = await s.taskInfo(OB.id);
+  assert(ibB.waitFor[0].id === OA.id && ibB.waitReady === false, JSON.stringify(ibB.waitFor));
+  assert.deepStrictEqual(((await s.taskInfo(OA.id)).waitingOnMe || []).map((x) => x.id), [OB.id]);
+  assert.deepStrictEqual(s.unblockedBy(OA.id), []);
+  ok('commit order: second task on the same lines waits for the first, both sides show it');
+  svn('commit', '-q', '-m', 'order A', ordPath);
+  assert.strictEqual((await s.checkCommitted(OA.id)).status, 'committed');
+  assert.deepStrictEqual(s.unblockedBy(OA.id).map((x) => x.id), [OB.id]);
+  ibB = await s.taskInfo(OB.id);
+  assert(ibB.waitReady === true, JSON.stringify(ibB.waitFor));
+  const ob2 = await s.landTask(OB.id, { dryRun: true });
+  assert(!ob2.ok && ob2.needsRebase && !ob2.waitFor.length, JSON.stringify(ob2));
+  const sy = await s.syncTask(OB.id, {});
+  assert(!sy.ok && sy.conflicts.includes('ord.txt'), JSON.stringify(sy));
+  fs.writeFileSync(path.join(OB.workPath, 'ord.txt'), crlf('o1\no2\no3 A B\no4\no5\no6\n'));
+  assert((await s.syncTask(OB.id, { cont: true })).ok);
+  const ob3 = await s.landTask(OB.id);
+  assert(ob3.ok, JSON.stringify(ob3.blocked));
+  assert(!s.resolveTask(OB.id).task.waitFor && /o3 A B/.test(R(ordPath)) && clOf('ord.txt') === OB.changelist);
+  await s.unlandTask(OB.id);
+  ok('commit order: first committed -> second unblocked, rebase (resolve) and land');
+
+  // ---------------------------------------------------------------- partial commit -> discard what is left
+  const ltPath = path.join(appDir, 'lt.txt');
+  W(ltPath, crlf('l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n'));
+  const lt2Path = path.join(appDir, 'lt2.txt');
+  W(lt2Path, crlf('only the task touches this\n'));
+  svn('add', '-q', ltPath, lt2Path);
+  svn('commit', '-q', '-m', 'add lt', ltPath, lt2Path);
+  await s.refreshScope(scope.id);
+  const LT = await s.createTask(scope.id, { title: 'leftover task' });
+  { const f = path.join(LT.workPath, 'lt.txt'); fs.writeFileSync(f, R(f).replace('l2\r\n', 'l2 LT\r\n')); }
+  fs.writeFileSync(path.join(LT.workPath, 'lt-new.txt'), 'new by task\r\n');
+  fs.writeFileSync(path.join(LT.workPath, 'lt2.txt'), 'changed by the task\r\n');
+  fs.writeFileSync(path.join(LT.workPath, 'lt-commit.txt'), 'committed part\r\n');
+  await s.commitTask(LT.id, 'leftover task');
+  const ll = await s.landTask(LT.id);
+  assert(ll.ok, JSON.stringify(ll.blocked));
+  // the user edits lt.txt elsewhere (l8), then commits ONLY lt-commit.txt (unchecked the rest in TortoiseSVN)
+  fs.writeFileSync(ltPath, R(ltPath).replace('l8\r\n', 'l8 USER\r\n'));
+  svn('commit', '-q', '-m', 'only lt-commit.txt', path.join(appDir, 'lt-commit.txt'));
+  const cs = await s.checkCommitted(LT.id);
+  assert.strictEqual(cs.status, 'committed');
+  const left = (await s.leftovers(LT.id)).map((x) => x.path).sort();
+  assert.deepStrictEqual(left, ['lt-new.txt', 'lt.txt', 'lt2.txt'], JSON.stringify(left));
+  assert.deepStrictEqual((s.resolveTask(LT.id).task.leftovers || []).sort(), left);
+  ok('partial commit: task committed, files left out of the commit listed as leftovers');
+  const disc = await s.discardLeftovers(LT.id);
+  assert(disc.files.every((f) => f.action !== 'conflict'), JSON.stringify(disc));
+  assert(!fs.existsSync(path.join(appDir, 'lt-new.txt')), 'new file of the task removed');
+  const lt2 = R(ltPath);
+  assert(!/l2 LT/.test(lt2) && /l8 USER/.test(lt2), 'only the task change removed: ' + lt2);
+  assert.strictEqual(R(lt2Path), 'only the task touches this\r\n');
+  assert(!clOf('lt.txt') && !clOf('lt-new.txt') && !clOf('lt2.txt'), 'nothing left in the task changelist (reverted files included)');
+  assert.deepStrictEqual(await s.leftovers(LT.id), []);
+  ok('discard leftovers: task change removed, user edit kept, changelist empty');
+
+  // ---------------------------------------------------------------- one changelist at a time
+  const ON1 = await s.createTask(scope.id, { title: 'single one' });
+  const ON2 = await s.createTask(scope.id, { title: 'single two' });
+  for (const [t, v] of [[ON1, 'ONE'], [ON2, 'TWO']]) {
+    const f = path.join(t.workPath, 'lt.txt');
+    fs.writeFileSync(f, R(f).replace('l5\r\n', `l5 ${v}\r\n`));
+    await s.commitTask(t.id, v);
+  }
+  assert((await s.landTask(ON1.id)).ok);
+  const rq = await s.requestChangelist(ON2.id);
+  assert(rq.ready && !rq.ok && rq.occupiedBy.some((o) => o.id === ON1.id), JSON.stringify(rq));
+  assert(s.resolveTask(ON2.id).task.readyAt && s.resolveTask(ON1.id).task.status === 'landed');
+  assert(/l5 ONE/.test(R(ltPath)));
+  ok('agent changelist request while another task holds it: marked ready, nothing replaced');
+  const cw = await s.clearWorkingCopy(ON2.id);
+  assert(cw.cleared.some((x) => x.id === ON1.id) && s.wcOccupants(ON2.id).length === 0, JSON.stringify(cw));
+  const l2 = await s.landTask(ON2.id);
+  assert(l2.ok, JSON.stringify(l2.blocked));
+  const ltNow = R(ltPath);
+  assert(/l5 TWO/.test(ltNow) && !/l5 ONE/.test(ltNow) && /l8 USER/.test(ltNow), ltNow);
+  assert.strictEqual(clOf('lt.txt'), s.resolveTask(ON2.id).task.changelist);
+  assert.strictEqual(s.resolveTask(ON1.id).task.status, 'active');
+  assert(!s.resolveTask(ON2.id).task.readyAt);
+  assert.deepStrictEqual(s.wcOccupants(ON1.id).map((x) => x.id), [ON2.id]);
+  ok('switch changelist: other task dropped (kept in git), same-line task lands, user edit kept');
+  await s.unlandTask(ON2.id);
+  // dropped changelists can be made again from git at any time (later checks use them)
+  for (const c of cw.cleared.filter((x) => x.status === 'landed' && x.id !== ON1.id)) {
+    const r = await s.landTask(c.id);
+    assert(r.ok, `re-land ${c.id}: ${JSON.stringify(r.blocked)}`);
+  }
+
   // case-only rename of a versioned file via git mv (Windows: same file on disk)
   const CR = await s.createTask(scope.id, { title: 'case rename' });
   const g = new (require('../src/core/git').Git)(t.git.path, null);

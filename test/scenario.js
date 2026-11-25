@@ -158,6 +158,18 @@ async function agentDocs(a) {
   return t;
 }
 
+// The person makes changelists in VS Code. Agents cannot replace another task's changelist (one at a time:
+// they only mark the task ready), so the demo builds its several changelists the way a 0.3.x working copy has them.
+const { Service } = require('../src/core/service');
+let HUMAN;
+async function humanLand(args, { allowError = false } = {}) {
+  HUMAN = HUMAN || new Service();
+  try { return JSON.parse(JSON.stringify(await HUMAN.landTask(args.task, { autoCommit: !!args.autoCommit }))); } catch (e) {
+    if (allowError) return { error: e.message };
+    throw e;
+  }
+}
+
 // ------------------------------------------------------------------ main
 async function main() {
   const tools = await env.requireTools();
@@ -233,21 +245,23 @@ async function main() {
   assert(l1.ok, JSON.stringify(l1));
   log('사람(대행)', `작업 ${SN} changelist ${l1.changelist} (${l1.commit.files.join(', ')})`);
   await sleep(PACE);
-  const lA = await A.tool('svnwt_task_changelist', { task: tA.id });
+  const rqA = await A.tool('svnwt_task_changelist', { task: tA.id });
+  assert(rqA.ready && !rqA.ok, 'agent must not replace another changelist: ' + JSON.stringify(rqA));
+  const lA = await humanLand({ task: tA.id });
   assert(lA.ok, JSON.stringify(lA));
   const rep = lA.files.find((f) => f.path === 'app/src/report.cpp');
   assert(rep.merged, 'report.cpp 는 다른 개발자 커밋과 3-way 병합되어야 함');
   log('agent-A', `changelist ${lA.changelist}: report.cpp 3-way 병합 (다른 개발자 변경 유지)`);
   await sleep(PACE);
-  const lCfail = await C.tool('svnwt_task_changelist', { task: tC.id }, { allowError: true });
+  const lCfail = await humanLand({ task: tC.id }, { allowError: true });
   assert(lCfail.error && /커밋되지 않은/.test(lCfail.error));
   log('agent-C', 'changelist 거부됨: 커밋 안 된 변경 → autoCommit=true 로 재시도');
-  const lC = await C.tool('svnwt_task_changelist', { task: tC.id, autoCommit: true });
+  const lC = await humanLand({ task: tC.id, autoCommit: true });
   assert(lC.ok, JSON.stringify(lC));
   assert(lC.commit.addedDirs.includes('app/docs'));
   log('agent-C', `changelist ${lC.changelist}: 새 폴더 app/docs 포함 → 커밋 명령은 --targets 방식`);
   await sleep(PACE);
-  const lB = await B.tool('svnwt_task_changelist', { task: tB.id });
+  const lB = await humanLand({ task: tB.id });
   assert(lB.ok && lB.files.find((f) => f.path === 'app/src/main.cpp').sharedWith === sample.changelist, JSON.stringify(lB));
   log('agent-B', `changelist ${lB.changelist}: main.cpp 는 ${SN} 과 같이 고친 공유 파일 (두 변경 모두 working copy 에 반영)`);
 
@@ -271,7 +285,7 @@ async function main() {
   const sB = await B.tool('svnwt_task_sync', { task: tB.id });
   assert(sB.ok, JSON.stringify(sB));
   log('agent-B', `최신 SVN 기준으로 rebase 성공 (작업 ${SN} 변경 위로)`);
-  const lB2 = await B.tool('svnwt_task_changelist', { task: tB.id });
+  const lB2 = await humanLand({ task: tB.id });
   assert(lB2.ok, JSON.stringify(lB2));
   log('agent-B', `changelist ${lB2.changelist}: ${lB2.commit.files.join(', ')}`);
 
@@ -281,7 +295,7 @@ async function main() {
   await A.tool('svnwt_task_commit', { task: tA.id, message: 'report: ab 출력' });
   const iA = await A.tool('svnwt_task_info', { task: tA.id });
   log('agent-A', `changelist 이후 추가 커밋 (상태 ${iA.task.status}) → changelist 갱신`);
-  const lA2 = await A.tool('svnwt_task_changelist', { task: tA.id });
+  const lA2 = await humanLand({ task: tA.id });
   assert(lA2.ok, JSON.stringify(lA2));
 
   // ------------------------------------------------------------------ verification

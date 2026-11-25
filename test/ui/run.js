@@ -138,7 +138,7 @@ class Driver {
   async webview(fnSrc, timeout = 15000, prefix = '') {
     const t = Date.now();
     for (;;) {
-      const sessions = [undefined, ...this.sessions.keys()];
+      const sessions = [undefined, ...[...this.sessions.keys()].reverse()]; // newest first: a moved webview can leave an old, stale target behind
       for (const s of sessions) {
         let tree;
         try { tree = await this.cdp.send('Page.getFrameTree', {}, s); } catch (_) { continue; }
@@ -160,6 +160,31 @@ class Driver {
       if (Date.now() - t > timeout) throw new Error('review webview not found');
       await sleep(300);
     }
+  }
+
+  /** Diagnostics: every webview frame whose review document matches the prefix. */
+  async webviewAll(fnSrc, prefix = '') {
+    const out = [];
+    for (const s of [undefined, ...this.sessions.keys()]) {
+      let tree;
+      try { tree = await this.cdp.send('Page.getFrameTree', {}, s); } catch (_) { continue; }
+      const frames = [];
+      const walk = (n, depth) => { frames.push({ ...n.frame, depth }); (n.childFrames || []).forEach((c) => walk(c, depth + 1)); };
+      walk(tree.frameTree, 0);
+      for (const f of frames.filter((x) => (x.url || '').startsWith('vscode-webview://'))) {
+        try {
+          const { executionContextId } = await this.cdp.send('Page.createIsolatedWorld', { frameId: f.id, worldName: 'svnwt-test' }, s);
+          const r = await this.cdp.send('Runtime.evaluate', {
+            contextId: executionContextId, returnByValue: true, awaitPromise: true,
+            expression: `(() => { const fr = document.querySelector('iframe#active-frame'); const d = fr ? fr.contentDocument : document;
+              if (!d || !d.body || !d.body.dataset.svnwtReview || !d.body.dataset.svnwtReview.startsWith(${JSON.stringify(prefix)})) return undefined;
+              return { via: fr ? 'outer' : 'self', iframes: [...document.querySelectorAll('iframe')].map((x) => x.id).join('+'), value: (${fnSrc})(d) }; })()`,
+          }, s);
+          if (r.result && r.result.value !== undefined) out.push({ session: s ? 'child' : 'page', depth: f.depth, url: (f.url || '').slice(0, 60), ...r.result.value });
+        } catch (e) { /* next */ }
+      }
+    }
+    return out;
   }
 
   async shot(step) {
@@ -214,17 +239,31 @@ async function setup() {
     'workbench.startupEditor': 'none', 'security.workspace.trust.enabled': false, 'telemetry.telemetryLevel': 'off',
     'update.mode': 'none', 'extensions.autoCheckUpdates': false, 'workbench.tips.enabled': false, 'window.restoreWindows': 'none',
     'workbench.colorTheme': 'Default Dark Modern', 'window.titleBarStyle': 'custom', 'chat.commandCenter.enabled': false,
-    'workbench.secondarySideBar.defaultVisibility': 'hidden', 'files.hotExit': 'off', 'window.dialogStyle': 'custom',
+    'workbench.secondarySideBar.defaultVisibility': 'hidden', 'files.hotExit': 'off', 'window.dialogStyle': 'custom', 'svnwt.agent.chatSessions': true,
     'extensions.ignoreRecommendations': true, 'git.openRepositoryInParentFolders': 'never',
   }, null, 2));
   return { demo, wc: path.join(demo, 'wc'), svc, report };
 }
 
+/** Scripted "language model" for the agent scenario (no Copilot in the isolated profile). */
+function writeFakeModel() {
+  const f = path.join(ROOT, 'fake-lm.json');
+  fs.writeFileSync(f, JSON.stringify([
+    { text: 'README 를 살펴보겠습니다.', calls: [['list_dir', { path: 'app' }], ['read_file', { path: 'app/README.md' }]], delayMs: 1500 },
+    { calls: [['edit_file', { path: 'app/README.md', old_string: 'SVN Worktree 데모용 프로젝트입니다.', new_string: 'SVN Worktree 데모용 프로젝트입니다.\n\n에이전트가 작업별 worktree 에서 수정했습니다.' }]], delayMs: 1500 },
+    { calls: [['run_command', { command: 'Write-Output build-ok' }]], delayMs: 500 },
+    { calls: [['git_commit', { message: 'README: 에이전트 설명 추가' }]], delayMs: 800 },
+    { text: '완료: app/README.md 에 설명을 추가하고 커밋했습니다. (빌드 확인: build-ok)', delayMs: 500 },
+    { text: '추가 지시 확인: 남은 작업은 없습니다.', delayMs: 500 },
+  ], null, 1));
+  return f;
+}
+
 function launch(folder) {
-  const env = { ...process.env };
+  const env = { ...process.env, SVNWT_FAKE_LM: writeFakeModel() };
   delete env.ELECTRON_RUN_AS_NODE;
   return spawn(CODE, [`--user-data-dir=${path.join(ROOT, 'ud')}`, `--extensions-dir=${path.join(ROOT, 'ext')}`, `--remote-debugging-port=${PORT}`,
-    '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--new-window', folder], { env, detached: false, stdio: 'ignore' });
+    '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--enable-proposed-api', 'svnwt.svn-worktree', '--new-window', folder], { env, detached: false, stdio: 'ignore' });
 }
 
 // ------------------------------------------------------------------ scenarios (test/ui/scenarios.js)
@@ -247,7 +286,7 @@ async function main() {
     await scenarios(d, ctx);
   } finally {
     fs.writeFileSync(path.join(OUT, 'steps.json'), JSON.stringify(d.steps, null, 2), 'utf8');
-    try { await cdp.send('Browser.close'); } catch (_) { /* ignore */ }
+    try { await Promise.race([cdp.send('Browser.close'), sleep(5000)]); } catch (_) { /* ignore */ }
     cdp.close();
     setTimeout(() => { try { proc.kill(); } catch (_) { /* ignore */ } killIsolated(); }, 3000);
   }

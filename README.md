@@ -17,7 +17,7 @@ SVN working copy (D:\svn\proj)            svnwt 저장 위치 (D:\svn\proj.svnwt
 1. **Git for Windows** 설치: <https://git-scm.com/download/win> 또는 `winget install --id Git.Git -e`
 2. **SVN 명령줄 클라이언트** 설치: TortoiseSVN 설치 시 *command line client tools* 선택
    (`winget install --id TortoiseSVN.TortoiseSVN -e --override "/passive ADDLOCAL=ALL"`)
-3. 확장 설치: `code --install-extension svn-worktree-0.3.1.vsix`
+3. 확장 설치: `code --install-extension svn-worktree-0.4.0.vsix`
    (또는 VS Code 확장 보기 → `...` → *VSIX에서 설치*)
 4. VS Code 재시작
 
@@ -45,8 +45,11 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
 5. **SVN 커밋 (사람)** — 리뷰 화면의 *커밋 준비* → 평소처럼 TortoiseSVN 커밋 창을 열어 커밋합니다.
    커밋 준비를 하면 TortoiseSVN 커밋 창에 **이 작업의 파일만 체크된 상태**로 나오고, 커밋 메시지는 클립보드에 복사돼 있습니다. 파일을 고를 필요 없이 확인하고 OK만 누르면 됩니다.
    커밋이 감지되면 자동으로 원래 상태로 정리되고 작업이 *커밋 완료*로 바뀝니다. 커밋을 그만두려면 *커밋 취소 (되돌리기)*.
+   커밋에서 뺀 파일은 changelist 에 남습니다(트리에 "남은 변경 N"). *남은 변경 버리기*로 이 작업의 변경만 되돌립니다.
 
 SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태에 맞춥니다.
+
+**changelist 는 하나만** — SVN working copy 에는 한 작업만 반영합니다. 다른 작업이 있으면 *SVN changelist 만들기*가 그것을 버리고 바꿀지 묻습니다(작업 내용은 git 에 남음). 에이전트는 바꾸지 않고 "리뷰 대기"로만 표시합니다.
 
 **커밋 준비가 하는 일** (커밋이 끝나거나 취소하면 모두 원래대로 돌아옵니다)
 - 이 작업 파일은 changelist 밖으로 → TortoiseSVN 기본 체크
@@ -59,6 +62,20 @@ SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태�
 **커밋 방법 설정** (`svnwt.commitTool`): `prepare`(기본, 커밋 준비만) · `tortoise`(TortoiseSVN 커밋 창을 직접 띄움) · `vscode`(확인 창에서 바로 커밋) · `ask`. 어느 방법이든 이 작업의 변경만 커밋됩니다. 리뷰 화면의 *다른 방법으로 커밋…*으로 그때그때 고를 수도 있습니다.
 
 **Playwright** — 각 worktree에서 `npm ci` 후 실행합니다. 스크린샷이 남도록 config에 `use: { screenshot: 'on' }`을 두거나 테스트에서 `page.screenshot`을 쓰세요. `test-results/`, `playwright-report/`, `node_modules/`는 작업 커밋에서 자동으로 제외됩니다.
+
+## 에이전트 (`@svnwt`, 작업별 세션)
+
+작업 하나가 에이전트 세션 하나입니다. Claude Code 처럼 작업마다 대화·상태가 따로 관리되고, 여러 작업을 동시에 돌릴 수 있습니다.
+
+- **채팅**: Copilot Chat 에서 `@svnwt 할 일` → 새 작업(worktree)을 만들고 그 안에서 진행합니다. 같은 대화에서 이어서 말하면 같은 작업이 이어집니다.
+  `/new` 새 작업으로 시작 · `/continue <번호> <지시>` 기존 작업 이어가기 · `/tasks` 작업 목록
+- **백그라운드**: SVN Worktree 트리의 ✨ *새 작업 (에이전트에게 맡기기)* → 할 일 입력. 트리에 *에이전트 실행 중 / 승인 대기* 가 표시되고, 끝나면 알림이 옵니다. 우클릭 *에이전트에게 지시… / 에이전트 중지*.
+- **작업 화면**: 리뷰 화면의 *에이전트 세션* 에서 요청·답변·도구 실행 기록을 보고, 바로 추가 지시(Ctrl+Enter)하거나 *채팅에서 이어가기*.
+- **안전장치**: 파일 도구는 작업 worktree 밖(SVN 원본, junction 으로 연결된 폴더, `.git`)에 접근할 수 없습니다. `svn commit/revert/update…` 같은 쓰기 명령은 막혀 있고, 명령 실행은 승인 후에만 됩니다 (`svnwt.agent.commandApproval`). SVN 커밋은 항상 사람이 합니다.
+- **인코딩**: CP949·UTF-8(BOM)·CRLF 를 파일별로 보존합니다.
+- **모델**: 채팅은 채팅 창에서 고른 모델, 백그라운드는 `svnwt.agent.model` (비우면 자동).
+- **커스텀 에이전트**: Chat 의 에이전트 선택에서 *SVN Task* (작업 진행) / *SVN Review* (리뷰만) 를 쓸 수도 있습니다 (Copilot 기본 에이전트 + svnwt MCP 도구).
+- **Chat 세션 목록 (실험)**: 명령 *SVN Worktree: Chat 세션 목록에 작업 표시 (실험)* → VS Code 재시작. VS Code 제안 API 를 쓰므로 버전에 따라 동작하지 않을 수 있습니다.
 
 ## Copilot이 쓰는 MCP 도구
 
@@ -105,6 +122,9 @@ test\e2e.js                        # 실제 svnadmin 로컬 저장소로 전체 
 scripts\make-demo.cmd              # 데모 SVN 저장소 + scope + 예제 작업
 scripts\run-scenario.cmd           # 에이전트 3개 동시 작업 시나리오 (MCP)
 scripts\run-ui-test.cmd            # 격리 VS Code 를 CDP 로 조작하는 UI 테스트 → docs\ui-test\report.html
+test\agent.js                      # 에이전트 루프 (가짜 모델, 실제 SVN 저장소)
+test\upgrade.js [ref]               # 이전 버전(git ref)이 만든 데이터를 현재 코드가 이어받는지
+test\ui\upgrade-ext.js old.vsix new.vsix  # 설치본 위에 새 vsix 를 덮어 설치하는 업그레이드
 ```
 
-구성: `src/core`(SVN·git 로직), `src/mcp`(의존성 없는 stdio MCP 서버), `src/ext`(VS Code 확장).
+구성: `src/core`(SVN·git 로직), `src/mcp`(의존성 없는 stdio MCP 서버), `src/agent`(에이전트 루프·도구·채팅 참가자), `src/ext`(VS Code 확장).

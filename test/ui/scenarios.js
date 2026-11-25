@@ -122,7 +122,7 @@ async function scenarios(d, ctx) {
     await d.mouse('mouseReleased', p.x, p.y, 'right');
     await sleep(800);
     const items = await d.eval(`[...document.querySelectorAll('.context-view .action-label, .monaco-menu .action-label')].map((e) => e.textContent.trim()).filter(Boolean)`);
-    assert(items.length > 0 && items.length <= 9, 'menu items: ' + items.length);
+    assert(items.length > 0 && items.length <= 10, 'menu items: ' + items.length);
     return { note: `${items.length}개: ${items.join(', ')}` };
   });
   await d.key('Escape');
@@ -235,35 +235,96 @@ async function scenarios(d, ctx) {
     await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 10000, 'dialog');
     return `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
   };
-  await step({ scenario: S6, action: '새 작업 리뷰 → "SVN changelist 만들기" (사용자가 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '충돌 확인 창: 원인 설명, 적용 가능한 선택지만' }, async () => {
+  await step({ scenario: S6, action: '새 작업 리뷰 → "SVN changelist 만들기" (다른 작업 changelist 3개가 있는 상태)', expect: '바꾸기 확인 창: 버릴 changelist 목록, 작업 내용은 git 에 남는다는 설명' }, async () => {
     await d.click('.activitybar .action-item .action-label', 'SVN Worktree');
     await sleep(600);
     await d.click('.monaco-list-row', 'tools build script');
     const note = await land();
-    assert(/직접 고친/.test(note), note);
+    assert(/바꿀까요/.test(note) && /report mul output/.test(note) && /git/.test(note), note);
+    return { note };
+  });
+  await step({ scenario: S6, action: '"바꾸기" 클릭 (사용자가 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '기존 changelist 는 버려지고, 직접 고친 파일과 겹친다는 확인 창' }, async () => {
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '바꾸기');
+    await d.waitFor(`[...document.querySelectorAll('.monaco-dialog-box .dialog-message-text, .monaco-dialog-box .dialog-message-detail')].some((e) => /직접 고친/.test(e.textContent))`, 30000, 'blocked dialog');
+    const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
+    const cls = (svnSt().match(/--- Changelist '([^']+)'/g) || []).length;
+    assert(cls === 0, 'other changelists dropped: ' + svnSt());
     return { note };
   });
   await d.key('Escape');
   await sleep(500);
   await step({ scenario: S6, action: '사용자가 SVN 원본의 로컬 수정을 되돌림 (svn revert) → 다시 "SVN changelist 만들기"', expect: '반영할 파일 목록이 있는 확인 창' }, async () => {
-    const svnExe = (await require('../../src/core/env').detect()).svn.path;
     require('child_process').execFileSync(svnExe, ['revert', path.join(ctx.wc, 'trunk', 'tools', 'build.cmd')]);
     await sleep(800);
     const note = await land();
     assert(/반영/.test(note), note);
     return { note };
   });
-  await step({ scenario: S6, action: '"반영" 클릭', expect: '완료 알림, 트리 상태 "커밋 대기 · 1파일"' }, async () => {
+  await step({ scenario: S6, action: '"반영" 클릭', expect: '트리: 이 작업만 "커밋 대기 · 1파일", 버린 작업은 "진행 중"' }, async () => {
     await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '반영');
-    await sleep(3500);
-    const rows = await treeRows();
+    let rows = [];
+    for (let i = 0; i < 60; i++) {
+      rows = await treeRows();
+      if (rows.some((r) => r.includes('tools build script') && /커밋 대기/.test(r))) break;
+      await sleep(300);
+    }
     const row = rows.find((r) => r.includes('tools build script')) || '';
-    assert(/커밋 대기/.test(row), row);
-    return { note: `${row.replace(/, has actions/, '')} / 알림: ${(await d.notifications()).join(' | ')}` };
+    const other = rows.find((r) => r.includes('report mul output')) || '';
+    assert(/커밋 대기/.test(row) && /진행 중/.test(other), `${row} / ${other}`);
+    return { note: `${row.replace(/, has actions/, '')} / ${other.replace(/, has actions/, '')}` };
   });
 
   // ---------------------------------------------------------------- 7
   const S7 = '7. 커밋 완료 / 정리';
+  await step({ scenario: S7, action: '"docs usage" changelist 를 만든 뒤 일부만 SVN 커밋 (app/docs 만, README 는 커밋에서 뺌)', expect: '작업은 커밋 완료, 트리에 "남은 변경 1", 리뷰 화면에 "남은 변경 버리기" 주 버튼과 남은 파일' }, async () => {
+    const docsId = ctx.svc.listTasks().find((t) => t.title === 'docs usage').id;
+    await ctx.svc.clearWorkingCopy(docsId);
+    const ld = await ctx.svc.landTask(docsId);
+    assert(ld.ok, 'land docs: ' + JSON.stringify(ld.blocked));
+    require('child_process').execFileSync(svnExe, ['commit', '-q', '-m', 'docs only', path.join(ctx.wc, 'trunk', 'app', 'docs')]);
+    const cs = await ctx.svc.checkCommitted(docsId);
+    assert(cs.status === 'committed', JSON.stringify(cs));
+    let row = '';
+    for (let i = 0; i < 70 && !/남은 변경 1/.test(row); i++) {
+      await sleep(300);
+      row = (await treeRows()).find((r) => r.includes('docs usage')) || '';
+    }
+    assert(/남은 변경 1/.test(row), row || 'docs usage row not visible');
+    await d.click('.monaco-list-row', 'docs usage');
+    let r = {};
+    for (let i = 0; i < 80 && !(r.buttons || []).includes('남은 변경 버리기'); i++) {
+      await sleep(300);
+      r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, notes: [...doc.querySelectorAll('.next .note')].map((n) => n.textContent).join(' '), buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent) })`, 8000, P.docs);
+    }
+    if (!(/커밋 완료/.test(r.title) && r.buttons[0] === '남은 변경 버리기')) {
+      const all = await d.webviewAll(`(doc) => doc.querySelector('.next-title').textContent`, P.docs);
+      throw new Error(`stale review: ${JSON.stringify(r)} · frames: ${JSON.stringify(all)}`);
+    }
+    assert(/README/.test(r.notes), JSON.stringify(r));
+    return { note: `${row.replace(/, has actions/, '')} / ${r.notes} [${r.buttons.join(', ')}]` };
+  });
+  await step({ scenario: S7, action: '"남은 변경 버리기" 클릭', expect: '버릴 파일 목록과 설명이 있는 확인 창' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="discardLeftovers"]').click(); return true; }`, 8000, P.docs);
+    await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 10000, 'dialog');
+    const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
+    assert(/README/.test(note), note);
+    return { note };
+  });
+  await step({ scenario: S7, action: '"버리기" 확인', expect: 'README 의 작업 변경이 SVN working copy 에서 빠지고 changelist 가 비고, 상태 상자는 "worktree 정리"' }, async () => {
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '버리기');
+    let st = svnSt();
+    for (let i = 0; i < 40 && /svnwt-.*docs-usage/.test(st); i++) { await sleep(300); st = svnSt(); }
+    assert(!/svnwt-.*docs-usage/.test(st), 'changelist left: ' + st.trim().replace(/\s+/g, ' '));
+    const readme = require('fs').readFileSync(path.join(ctx.wc, 'trunk', 'app', 'README.md'), 'utf8');
+    assert(!/docs\/guide\.md/.test(readme), readme);
+    let b = [];
+    for (let i = 0; i < 30 && b[0] !== 'worktree 정리'; i++) {
+      await sleep(300);
+      b = await d.webview(`(doc) => [...doc.querySelectorAll('.next .actions button')].map((x) => x.textContent)`, 8000, P.docs);
+    }
+    assert(b[0] === 'worktree 정리', b.join(', '));
+    return { note: `changelist 비움, 알림: ${(await d.notifications()).join(' | ').slice(0, 160)}` };
+  });
   await step({ scenario: S7, action: '커밋 완료된 작업(#1) 리뷰 화면', expect: '"worktree 정리" 주 버튼' }, async () => {
     await d.click('.monaco-list-row', 'main에서 mul');
     const r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent) })`, 8000, P.sample);
@@ -281,6 +342,117 @@ async function scenarios(d, ctx) {
     const rows = await treeRows();
     assert(!rows.some((r) => r.includes('main에서 mul')), rows.join(' | '));
     return { note: `남은 작업: ${rows.filter((r) => r.startsWith('#')).map((r) => r.split(' ').slice(0, 1)).join(', ')}` };
+  });
+
+  // ---------------------------------------------------------------- 8
+  const S8 = '8. 에이전트 (작업별 세션)';
+  const fsx = require('fs');
+  await step({ scenario: S8, action: '커스텀 에이전트 / Chat 세션 등록 확인', expect: 'SVN Task·SVN Review 에이전트 파일, @svnwt 참가자, (제안 API 허용 시) 세션 목록 등록' }, async () => {
+    const prompts = path.join(process.env.SVNWT_TEST_USERDATA || path.join(path.dirname(ctx.demo), 'ud'), 'User', 'prompts');
+    const files = fsx.existsSync(prompts) ? fsx.readdirSync(prompts) : [];
+    assert(files.includes('svnwt-task.agent.md') && files.includes('svnwt-review.agent.md'), files.join(','));
+    const logDir = path.join(path.dirname(ctx.demo), 'ud', 'logs');
+    let out = '';
+    const walk = (dd) => { for (const e of fsx.readdirSync(dd, { withFileTypes: true })) { const p = path.join(dd, e.name); if (e.isDirectory()) walk(p); else if (/SVN Worktree\.log$/.test(e.name)) out += fsx.readFileSync(p, 'utf8'); } };
+    walk(logDir);
+    const sessions = /chat sessions: 작업 목록을/.test(out) ? '세션 목록 등록됨' : (/chat sessions:/.test(out) ? out.match(/chat sessions:[^\n]*/)[0] : '세션 목록 로그 없음');
+    return { note: `${files.filter((f) => /agent\.md$/.test(f)).join(', ')} · ${sessions}` };
+  });
+  let agentTaskNo = null;
+  await step({ scenario: S8, action: '트리 제목줄 "새 작업 (에이전트에게 맡기기)" → 할 일 입력', expect: '작업 생성, 리뷰 화면이 열리고 트리에 "에이전트 실행 중"' }, async () => {
+    await d.command('SVN Worktree: 새 작업 (에이전트에게 맡기기)');
+    await sleep(800);
+    await d.type('README 에 에이전트 설명을 한 줄 추가해줘');
+    await d.key('Enter');
+    await d.waitFor(`[...document.querySelectorAll('.monaco-list-row')].some((r) => /에이전트 실행 중|승인 대기/.test(r.getAttribute('aria-label') || ''))`, 20000, 'running row');
+    const row = (await treeRows()).find((r) => /에이전트 실행 중|승인 대기/.test(r)) || '';
+    agentTaskNo = (/#(\d+)/.exec(row) || [])[1];
+    return { note: row.replace(/, has actions/, '') };
+  });
+  await step({ scenario: S8, action: '에이전트가 run_command 를 요청', expect: '명령과 실행 위치가 보이는 승인 창 (실행 / 이 작업에서 항상 허용)' }, async () => {
+    await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 30000, 'approval dialog');
+    const msg = await dialog();
+    assert(/명령을 실행하려고/.test(msg) && /build-ok/.test(msg), msg);
+    return { note: `${msg.slice(0, 160)} [버튼: ${(await dialogButtons()).join(', ')}]` };
+  });
+  await step({ scenario: S8, action: '"실행" 승인 → 완료까지 대기', expect: '완료 알림, 세션에 도구 실행 기록(✓)과 최종 답변, 작업 커밋' }, async () => {
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '실행');
+    await d.waitFor(`[...document.querySelectorAll('.notifications-toasts .notification-list-item-message')].some((e) => /에이전트 완료/.test(e.textContent))`, 30000, 'done notification');
+    await sleep(1200);
+    const prefix = agentTaskNo + '-';
+    const tr = await d.webview(`(doc) => { const t = doc.getElementById('transcript'); if (t) t.scrollIntoView(); return t ? [...t.children].map((c) => c.textContent.replace(/\\s+/g, ' ').trim()).join(' | ') : ''; }`, 30000, prefix);
+    assert(/✓ 수정 app\/README\.md/.test(tr) && /✓ 실행 Write-Output build-ok/.test(tr) && /완료: app\/README\.md/.test(tr), tr);
+    const info = ctx.svc.listTasks().find((t) => String(t.no) === agentTaskNo);
+    const st = await ctx.svc.taskInfo(info.id, { checkSvn: false });
+    assert(st.commits.some((c) => /에이전트 설명/.test(c.subject)), JSON.stringify(st.commits));
+    return { note: tr.slice(0, 300) };
+  });
+  await step({ scenario: S8, action: '리뷰 화면 에이전트 입력란에서 추가 지시 (Ctrl+Enter)', expect: '같은 작업 세션에 이어서 기록' }, async () => {
+    const prefix = agentTaskNo + '-';
+    await d.webview(`(doc) => { const a = doc.getElementById('agentInput'); a.value = '남은 작업이 있는지 확인해줘'; a.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })); return true; }`, 8000, prefix);
+    await d.waitFor(`[...document.querySelectorAll('.notifications-toasts .notification-list-item-message')].some((e) => /추가 지시 확인/.test(e.textContent))`, 30000, 'second run');
+    let tr = '';
+    for (let i = 0; i < 40 && !(/추가 지시 확인/.test(tr) && !/중지 버튼 남음/.test(tr)); i++) {
+      await sleep(300);
+      tr = await d.webview(`(doc) => [...doc.getElementById('transcript').children].slice(-3).map((c) => c.textContent.replace(/\\s+/g, ' ').trim()).join(' | ') + (doc.querySelector('button[data-cmd="agentStop"]') ? ' [중지 버튼 남음]' : '')`, 8000, prefix);
+    }
+    assert(/남은 작업이 있는지/.test(tr) && /추가 지시 확인/.test(tr) && !/중지 버튼 남음/.test(tr), tr);
+    const files = await d.webview(`(doc) => [...doc.querySelectorAll('h2')].map((h) => h.textContent.trim()).find((x) => x.startsWith('변경된 파일'))`, 8000, prefix);
+    assert(/\(1\)/.test(files), 'review shows the committed file: ' + files);
+    return { note: `${tr} · ${files}` };
+  });
+
+  // ---------------------------------------------------------------- 9
+  const S9 = '9. changelist 는 하나만 (같은 줄을 고친 두 작업)';
+  const scopeId = 'demo';
+  const OA = await ctx.svc.createTask(scopeId, { title: 'readme title A' });
+  const OB = await ctx.svc.createTask(scopeId, { title: 'readme title B' });
+  for (const [t, v] of [[OA, 'A'], [OB, 'B']]) {
+    const f = path.join(t.workPath, 'app', 'README.md');
+    fsx.writeFileSync(f, fsx.readFileSync(f, 'utf8').replace('SVN Worktree 데모용 프로젝트입니다.', `SVN Worktree 데모용 프로젝트입니다 (${v}).`));
+    await ctx.svc.commitTask(t.id, `README ${v}`);
+  }
+  await ctx.svc.clearWorkingCopy(OA.id);
+  const la = await ctx.svc.landTask(OA.id);
+  assert(la.ok, 'land A: ' + JSON.stringify(la.blocked));
+  const rqB = await ctx.svc.requestChangelist(OB.id);
+  assert(rqB.ready, 'agent request is only marked ready: ' + JSON.stringify(rqB));
+  await step({ scenario: S9, action: '에이전트가 changelist 를 요청했지만 다른 작업이 들어 있는 작업 (B) 리뷰 화면', expect: '트리와 리뷰 화면에 "리뷰 대기", 지금 SVN 에 반영된 작업 안내' }, async () => {
+    let row = '';
+    for (let i = 0; i < 70 && !/리뷰 대기/.test(row); i++) { await sleep(300); row = (await treeRows()).find((r) => r.includes('readme title B')) || ''; }
+    assert(/리뷰 대기/.test(row), row || 'row not visible');
+    await d.click('.monaco-list-row', 'readme title B');
+    let notes = '';
+    for (let i = 0; i < 60 && !/바뀝니다/.test(notes); i++) {
+      await sleep(300);
+      notes = await d.webview(`(doc) => doc.querySelector('.next-title').textContent + ' / ' + [...doc.querySelectorAll('.next .note')].map((n) => n.textContent).join(' ')`, 20000, String(OB.no) + '-').catch(() => notes);
+    }
+    assert(/바뀝니다/.test(notes) && new RegExp(`#${OA.no}`).test(notes), notes);
+    return { note: `${row.replace(/, has actions/, '')} / ${notes}` };
+  });
+  await step({ scenario: S9, action: '"SVN changelist 만들기" 클릭', expect: '바꾸기 확인 창: 버릴 changelist 목록(A 포함), 작업 내용은 git 에 남는다는 설명' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="land"]').click(); return true; }`, 15000, String(OB.no) + '-');
+    await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 15000, 'dialog');
+    const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
+    assert(/바꿀까요/.test(note) && /readme title A/.test(note) && /git/.test(note), note);
+    return { note };
+  });
+  await step({ scenario: S9, action: '"바꾸기" 확인', expect: 'B 만 changelist (커밋 대기), A 는 진행 중으로 돌아감, SVN working copy 에는 B 의 줄만' }, async () => {
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '바꾸기');
+    let rows = [];
+    for (let i = 0; i < 100; i++) {
+      rows = await treeRows();
+      if (rows.some((r) => r.includes('readme title B') && /커밋 대기/.test(r)) && rows.some((r) => r.includes('readme title A') && /진행 중/.test(r))) break;
+      await sleep(300);
+    }
+    const rb = rows.find((r) => r.includes('readme title B')) || '';
+    const ra = rows.find((r) => r.includes('readme title A')) || '';
+    assert(/커밋 대기/.test(rb) && /진행 중/.test(ra), `${rb} / ${ra}`);
+    const readme = fsx.readFileSync(path.join(ctx.wc, 'trunk', 'app', 'README.md'), 'utf8');
+    assert(/\(B\)/.test(readme) && !/\(A\)/.test(readme), readme);
+    const cls = (svnSt().match(/--- Changelist '([^']+)'/g) || []).map((x) => x.replace(/--- Changelist '|'/g, ''));
+    assert(cls.length === 1 && cls[0] === ctx.svc.resolveTask(OB.id).task.changelist, cls.join(', '));
+    return { note: `${rb.replace(/, has actions/, '')} / ${ra.replace(/, has actions/, '')} / changelist: ${cls.join(', ')}` };
   });
 }
 

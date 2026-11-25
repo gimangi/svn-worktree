@@ -79,9 +79,13 @@ class ReviewPanel {
   async onMessage(m) {
     const c = this.ctx;
     if (m.cmd !== 'scrolled') this.keep();
+    if (typeof m.cmd === 'string' && m.cmd.startsWith('openTask:')) m = { cmd: 'openTask', task: m.cmd.slice('openTask:'.length) };
     try {
       switch (m.cmd) {
         case 'keep': return undefined;
+        case 'agentSend': return m.text && m.text.trim() ? vscode.commands.executeCommand('svnwt.agent.instruct', this.taskId, m.text.trim()) : undefined;
+        case 'agentStop': return vscode.commands.executeCommand('svnwt.agent.stop', this.taskId);
+        case 'agentChat': return vscode.commands.executeCommand('svnwt.agent.openChat', this.taskId);
         case 'commitChoose': return vscode.commands.executeCommand('svnwt.commitSvnChoose', this.taskId);
         case 'cancelCommit': return vscode.commands.executeCommand('svnwt.cancelCommit', this.taskId);
         case 'openChanges': return vscode.commands.executeCommand('svnwt.openChanges', this.taskId);
@@ -96,6 +100,9 @@ class ReviewPanel {
         case 'worktree': return vscode.commands.executeCommand('svnwt.openWorktree', this.taskId);
         case 'terminal': return vscode.commands.executeCommand('svnwt.openTerminal', this.taskId);
         case 'remove': return vscode.commands.executeCommand('svnwt.removeTask', this.taskId);
+        case 'discardLeftovers': return vscode.commands.executeCommand('svnwt.discardLeftovers', this.taskId);
+        case 'rebaseLand': return vscode.commands.executeCommand('svnwt.rebaseAndLand', this.taskId);
+        case 'openTask': return vscode.commands.executeCommand('svnwt.openReview', m.task);
         case 'refresh': return this.update(true);
         case 'openArtifact': return vscode.commands.executeCommand('vscode.open', vscode.Uri.file(m.file), { preview: true, viewColumn: vscode.ViewColumn.Beside });
         case 'saveMessage':
@@ -110,17 +117,25 @@ class ReviewPanel {
   }
 
   async update(checkSvn = false) {
+    // Updates overlap while an agent works (every tool step fires one). Only the most recently started
+    // update may render; an older, slower one finishing later would show stale data (e.g. before a commit).
+    const gen = (this.gen = (this.gen || 0) + 1);
     let html;
     try {
       const info = await this.ctx.service.taskInfo(this.taskId, { checkSvn });
-      const reviews = this.ctx.service.listReviews(this.taskId);
       const message = await this.ctx.service.getCommitMessage(this.taskId);
+      if (gen !== this.gen) return;
+      const reviews = this.ctx.service.listReviews(this.taskId);
       const runs = this.ctx.service.listArtifacts(this.taskId);
+      this.session = this.ctx.service.getSession(this.taskId).entries.slice(-80);
+      this.agentRunning = this.ctx.isAgentRunning ? this.ctx.isAgentRunning(this.taskId) : false;
       this.panel.title = `#${info.task.no} ${info.task.title}`;
       html = this.render(info, reviews, message, runs);
     } catch (e) {
+      if (gen !== this.gen) return;
       html = this.shell(`<div class="error">${esc(e.message)}</div>`);
     }
+    if (this.disposed) return;
     // re-render only when something changed (keeps scroll position / textarea focus while agents work)
     const key = html.replace(/nonce-[a-z0-9]+|nonce="[a-z0-9]+"/g, '');
     if (key === this.lastKey) return;
@@ -172,11 +187,26 @@ class ReviewPanel {
         title = '작업 중';
         text = '아직 커밋된 변경이 없습니다. Copilot 이 worktree 에서 작업하고 커밋하면 여기에 표시됩니다.';
       } else {
-        title = '리뷰 후 SVN changelist 만들기';
+        title = t.readyAt ? '리뷰 대기' : '리뷰 후 SVN changelist 만들기';
         text = '변경을 SVN working copy 에 반영하고 이 작업 전용 changelist 로 묶습니다. SVN 커밋은 그 다음에 직접 합니다.';
         buttons = [['land', 'SVN changelist 만들기', 'primary'], ['openChanges', '모든 변경 사항 보기'], ['askCopilot', 'Copilot 리뷰 요청']];
       }
-      if (!info.baseIsLatest) {
+      const waitFor = info.waitFor || [];
+      if (files.length && waitFor.length && !info.waitReady) {
+        const pending = waitFor.filter((w) => !w.ready);
+        title = `#${pending.map((w) => w.no).join(', #')} 커밋 후 진행`;
+        text = `${pending.map((w) => `#${w.no} "${w.title}"`).join(', ')} 와 같은 부분(${[...new Set(pending.flatMap((w) => w.files))].join(', ')})을 고쳤습니다. 그 작업을 먼저 SVN 커밋하면, 이 작업을 rebase 해서 changelist 를 만들 수 있습니다.`;
+        buttons = [...pending.slice(0, 2).map((w) => [`openTask:${w.id}`, `#${w.no} 리뷰 열기`, 'primary']), ['land', 'SVN changelist 만들기'], ['openChanges', '모든 변경 사항 보기']];
+      } else if (files.length && waitFor.length) {
+        title = 'rebase 후 SVN changelist 만들기';
+        text = `기다리던 작업(${waitFor.map((w) => `#${w.no}`).join(', ')})이 ${waitFor.every((w) => w.status === 'committed') ? '커밋되었습니다' : '정리되었습니다'}. 최신 SVN 기준으로 rebase 한 뒤 changelist 를 만듭니다. 같은 줄을 고친 부분은 rebase 할 때 worktree 에서 정리해야 할 수 있습니다.`;
+        buttons = [['rebaseLand', 'rebase 후 changelist 만들기', 'primary'], ['openChanges', '모든 변경 사항 보기']];
+      }
+      const occ = info.occupants || [];
+      if (files.length && occ.length) {
+        notes.push(['info', `SVN 에 ${occ.map((o) => `#${o.no} "${o.title}"`).join(', ')} 이(가) 반영돼 있습니다. 만들면 이 작업으로 바뀝니다.`]);
+      }
+      if (!info.baseIsLatest && !waitFor.length) {
         notes.push(['info', `이 작업을 시작한 뒤 SVN 기준이 ${info.svnBaseCommitsBehind}번 갱신되었습니다. 충돌이 걱정되면 먼저 최신 기준으로 rebase 하세요.`]);
         buttons.push(['sync', '최신 SVN 기준으로 rebase']);
       }
@@ -187,27 +217,55 @@ class ReviewPanel {
         : '커밋 진행 중입니다.';
       buttons = [['cancelCommit', '커밋 취소 (되돌리기)']];
     } else if (t.status === 'landed') {
-      const external = vscode.workspace.getConfiguration('svnwt').get('commitTool') === 'prepare';
+      const external = ['prepare', 'external', undefined, ''].includes(vscode.workspace.getConfiguration('svnwt').get('commitTool'));
       const shared = Object.keys((t.landed && t.landed.shared) || {});
       title = 'SVN 커밋 대기';
       text = `changelist ${t.changelist} · 파일 ${(t.landed && t.landed.files.length) || 0}개가 SVN working copy 에 반영되어 있습니다.`;
       if (shared.length) notes.push(['info', `다른 작업과 같이 고친 파일 ${shared.length}개 (${shared.join(', ')}) — 커밋할 때 이 작업의 변경만 들어갑니다.`]);
       if (info.commitInProgress && !info.commitInProgress.mine) notes.push(['warn', `다른 작업(${info.commitInProgress.task})의 커밋이 준비 중입니다. 그 커밋이 끝난 뒤 진행하세요.`]);
+      if ((info.waitingOnMe || []).length) notes.push(['info', `${info.waitingOnMe.map((w) => `#${w.no} "${w.title}"`).join(', ')} 가 이 작업의 커밋을 기다립니다 (같은 부분 수정). 이 작업을 먼저 커밋하세요.`]);
       buttons = [['commitSvn', external ? '커밋 준비' : 'SVN 커밋…', 'primary'], ['openChanges', '모든 변경 사항 보기'], ['askCopilot', 'Copilot 리뷰 요청']];
       if (t.landed && info.tip !== t.landed.commit) {
         notes.push(['warn', 'changelist 를 만든 뒤 새 커밋이 생겼습니다. 갱신해야 SVN working copy 에 반영됩니다.']);
         buttons = [['land', 'changelist 갱신', 'primary'], ['commitSvn', 'SVN 커밋…'], ['openChanges', '모든 변경 사항 보기']];
       }
     } else if (t.status === 'committed') {
+      const left = info.leftovers || [];
       title = 'SVN 커밋 완료';
       text = '이 작업은 SVN 에 커밋되었습니다. worktree 를 정리해도 됩니다.';
       buttons = [['remove', 'worktree 정리', 'primary'], ['openChanges', '변경 사항 보기']];
+      if (left.length) {
+        notes.push(['warn', `커밋에서 빠진 파일 ${left.length}개가 남아 있습니다: ${left.join(', ')}`]);
+        buttons = [['discardLeftovers', '남은 변경 버리기', 'primary'], ['remove', 'worktree 정리'], ['openChanges', '변경 사항 보기']];
+      }
     }
     const cmd = t.status === 'landed' && info.commit && !(info.commitInProgress && info.commitInProgress.mine)
       ? `<div class="sub"><a href="#" data-cmd="commitChoose">다른 방법으로 커밋…</a></div>` : '';
     return `<div class="next next-${esc(t.status)}"><div class="next-title">${esc(title)}</div><div class="next-text">${esc(text)}</div>
       ${notes.map(([k, n]) => `<div class="note note-${k}">${esc(n)}</div>`).join('')}
       <div class="actions">${buttons.map(([c, l, k]) => `<button data-cmd="${c}" class="${k || ''}">${esc(l)}</button>`).join('')}</div>${cmd}</div>`;
+  }
+
+  renderAgent(t) {
+    const st = (t.agent && t.agent.state) || 'idle';
+    const running = st === 'running' || st === 'waiting' || (!t.agent && this.agentRunning);
+    const badge = running
+      ? `<span class="badge warn">${st === 'waiting' ? '승인 대기' : '실행 중'}</span>`
+      : st === 'error' ? '<span class="badge bad">오류</span>' : '';
+    const items = (this.session || []).map((e) => {
+      const time = esc(new Date(e.at).toLocaleTimeString());
+      if (e.role === 'user') return `<div class="msg user"><div class="who">요청 <span class="muted">${time}${e.source === 'chat' ? ' · 채팅' : ''}</span></div><div class="body">${esc(e.text)}</div></div>`;
+      if (e.role === 'assistant') return `<div class="msg bot"><div class="body">${esc(e.text)}</div></div>`;
+      if (e.role === 'tool') return `<div class="tool ${e.ok === false ? 'fail' : ''}" title="${esc(e.result || '')}">${e.ok === undefined ? '…' : e.ok ? '✓' : '✗'} ${esc(e.label)}</div>`;
+      return `<div class="info muted">${esc(e.text)}</div>`;
+    }).join('');
+    const canTalk = t.status === 'active' || t.status === 'landed';
+    return `<section class="agent"><h2>에이전트 세션 ${badge}</h2>
+      ${items ? `<div class="transcript" id="transcript">${items}</div>` : '<p class="muted">아직 에이전트 대화가 없습니다. 아래에 지시를 쓰거나 채팅에서 <code>@svnwt</code> 로 시작하세요.</p>'}
+      ${t.agent && t.agent.state === 'waiting' && t.agent.waitingFor ? `<div class="note note-warn">명령 실행 승인 대기: <code>${esc(t.agent.waitingFor)}</code></div>` : ''}
+      ${canTalk ? `<textarea id="agentInput" rows="3" placeholder="에이전트에게 지시 (Ctrl+Enter 로 보내기)"${running ? ' disabled' : ''}></textarea>
+      <div class="actions">${running ? '<button data-cmd="agentStop">중지</button>' : '<button id="agentSend" class="primary">지시 보내기</button>'}<button data-cmd="agentChat">채팅에서 이어가기</button></div>` : ''}
+    </section>`;
   }
 
   render(info, reviews, message, runs = []) {
@@ -243,13 +301,14 @@ class ReviewPanel {
     const body = `
       ${this.isPreview ? '<div class="pv muted">미리보기 탭 — 다른 작업을 열면 이 탭에 표시됩니다 · <a href="#" data-cmd="keep">탭 유지</a></div>' : ''}
       <header>
-        <h1>#${t.no} ${esc(t.title)} <span class="badge ${STATUS_CLASS[t.status]}" title="${esc(STATUS_TEXT[t.status] || '')}">${esc(STATUS_LABEL[t.status] || t.status)}</span>
+        <h1>#${t.no} ${esc(t.title)} <span class="badge ${STATUS_CLASS[t.status]}" title="${esc(STATUS_TEXT[t.status] || '')}">${esc(t.status === 'active' && t.readyAt ? '리뷰 대기' : (STATUS_LABEL[t.status] || t.status))}</span>
           ${lastRun && lastRun.status ? `<span class="badge ${lastRun.status === 'passed' ? 'ok' : 'bad'}">테스트 ${lastRun.status === 'passed' ? '통과' : '실패'}</span>` : ''}
           ${latest ? `<span class="badge ${(VERDICT[latest.verdict] || [])[1] || 'info'}">리뷰: ${esc((VERDICT[latest.verdict] || [latest.verdict])[0])}</span>` : ''}</h1>
         <div class="meta">SVN r${esc(info.scope.revision)} 기준 · 커밋 ${info.commits.length}개 · 파일 ${files.length}개 <span class="plus">+${add}</span> <span class="minus">-${del}</span></div>
         <div class="meta muted" title="${esc(t.workPath)}">worktree <code>${esc(t.branch)}</code> · <a href="#" data-cmd="worktree">열기</a> · <a href="#" data-cmd="terminal">터미널</a>${t.status === 'landed' ? ' · <a href="#" data-cmd="unland" class="danger">SVN 반영 되돌리기</a>' : ''}</div>
       </header>
       ${this.renderNext(info, files)}
+      ${this.renderAgent(t)}
       ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
       <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
       <section><h2>테스트 화면${runs.length ? ` <span class="muted">(${runs.length}회)</span>` : ''}</h2>${this.renderRuns(runs, info.tip)}</section>
@@ -287,6 +346,12 @@ class ReviewPanel {
   .next-title { font-weight: 600; font-size: 1.05em; margin-bottom: 3px; }
   .note { margin: 6px 0; padding: 4px 8px; border-radius: 3px; }
   .note-warn { background: var(--vscode-inputValidation-warningBackground); } .note-info { background: var(--vscode-textCodeBlock-background); }
+  .transcript { max-height: 420px; overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 8px 10px; margin: 6px 0 8px; }
+  .msg { margin: 8px 0; } .msg .who { font-size: 0.85em; font-weight: 600; }
+  .msg.user .body { background: var(--vscode-textCodeBlock-background); border-radius: 4px; padding: 6px 8px; }
+  .tool { font-family: var(--vscode-editor-font-family); font-size: 0.88em; color: var(--vscode-descriptionForeground); margin: 2px 0 2px 6px; }
+  .tool.fail { color: var(--vscode-errorForeground); } .info { font-style: italic; margin: 6px 0; }
+  #agentInput { margin-top: 4px; }
   .pv { font-size: 0.85em; margin-top: 8px; } .sub { margin-top: 6px; font-size: 0.92em; }
   details.cmd summary { cursor: pointer; color: var(--vscode-textLink-foreground); margin-top: 6px; }
   figure.shot.failed { border-color: var(--vscode-errorForeground); }
@@ -340,9 +405,21 @@ class ReviewPanel {
   }
   // keep the scroll position across re-renders
   const task = document.body.dataset.svnwtReview;
+  const tr = document.getElementById('transcript');
+  if (tr) tr.scrollTop = tr.scrollHeight;
+  const ai = document.getElementById('agentInput');
+  const send = () => { if (ai && ai.value.trim()) { vscode.postMessage({ cmd: 'agentSend', text: ai.value }); ai.value = ''; vscode.setState(Object.assign({}, vscode.getState() || {}, { draft: '' })); } };
+  if (ai) {
+    const d = (vscode.getState() || {}).draft;
+    if (d && (vscode.getState() || {}).task === task) ai.value = d;
+    ai.addEventListener('input', () => vscode.setState(Object.assign({}, vscode.getState() || {}, { task, draft: ai.value })));
+    ai.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
+  }
+  const sb = document.getElementById('agentSend');
+  if (sb) sb.addEventListener('click', send);
   const st = vscode.getState() || {};
   if (st.task === task && st.scroll) window.scrollTo(0, st.scroll);
-  window.addEventListener('scroll', () => vscode.setState({ task, scroll: window.scrollY }));
+  window.addEventListener('scroll', () => vscode.setState(Object.assign({}, vscode.getState() || {}, { task, scroll: window.scrollY })));
 </script></body></html>`;
   }
 }
