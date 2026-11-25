@@ -236,7 +236,7 @@ class Service {
    */
   async refreshScope(ref, opts = {}) {
     const scope = this.resolveScope(ref);
-    return store.withLock(path.join(scope.home, 'lock'), () => this._snapshot(scope, opts));
+    return store.withLock(path.join(scope.home, 'lock'), () => this._snapshot(scope, opts), { op: `${scope.id}: SVN 기준 읽기 (snapshot${opts.svnUpdate ? ' + svn update' : ''})` });
   }
 
   async _snapshot(scope, { svnUpdate = false } = {}) {
@@ -246,7 +246,11 @@ class Service {
     let updateOutput = null;
     if (svnUpdate) updateOutput = (await svn.exec(['update', '--accept', 'postpone', scope.svnPath])).trim();
     const info = await svn.info(scope.svnPath);
+    const T = { start: started };
+    const lap = (k) => { T[k] = Date.now() - (T._last || T.start); T._last = Date.now(); };
+    lap('svnUpdateAndInfoMs');
     const entries = await svn.status(scope.svnPath, { verbose: true });
+    lap('svnStatusMs');
 
     const working = [];
     const pristine = [];
@@ -291,6 +295,7 @@ class Service {
     const toRemove = current.filter((p) => !wanted.has(p) && !pristineSet.has(p));
     if (toRemove.length) await git.buf(['update-index', '-z', '--force-remove', '--stdin'], { ...gopts, input: toRemove.join('\0') + '\0' });
     if (working.length) await git.buf(['update-index', '-z', '--add', '--remove', '--stdin'], { ...gopts, input: working.join('\0') + '\0' });
+    lap('hashFilesMs');
     const infoLines = [];
     const pristineFailed = [];
     for (const rel of pristine) {
@@ -300,6 +305,7 @@ class Service {
       infoLines.push(`100644 ${sha}\t${rel}`);
     }
     if (infoLines.length) await git.buf(['update-index', '-z', '--index-info'], { ...gopts, input: infoLines.join('\0') + '\0' });
+    lap('pristineMs');
     const tree = (await git.exec(['write-tree'], gopts)).trim();
 
     const old = await git.revParse(BASE_REF);
@@ -320,18 +326,22 @@ class Service {
     if (!(await git.raw(['symbolic-ref', 'HEAD'])).stdout.toString().includes(BASE_BRANCH)) {
       await git.raw(['symbolic-ref', 'HEAD', BASE_REF]);
     }
+    lap('commitMs');
     await this._syncIgnores(scope, svn);
+    lap('ignoresMs');
 
     scope.revision = info.revision;
     scope.url = info.url;
     scope.baseCommit = commit;
     scope.lastSnapshotAt = now();
     scope.mixedRevision = minRev !== maxRev ? `r${minRev}:r${maxRev}` : null;
+    delete T._last; delete T.start;
+    scope.lastSnapshot = Object.assign({ at: now(), totalMs: Date.now() - started, files: working.length + pristine.length, modifiedFiles: pristine.length }, T);
     this._saveScope(scope);
     return {
       scope: scope.id, revision: info.revision, baseCommit: commit, changed,
       files: working.length + infoLines.length, locallyModifiedUsingPristine: infoLines.length,
-      pristineFailed, mixedRevision: scope.mixedRevision, elapsedMs: Date.now() - started, svnUpdate: updateOutput,
+      pristineFailed, mixedRevision: scope.mixedRevision, elapsedMs: Date.now() - started, timings: scope.lastSnapshot, svnUpdate: updateOutput,
     };
   }
 
@@ -409,61 +419,107 @@ class Service {
     return { scope: pick.s, task: pick.t };
   }
 
-  async createTask(scopeRef, { title, description = '', fromBase = true } = {}) {
+  /** Current locks (who holds them, for how long, whether the holder is still alive). */
+  locks() {
+    const res = [];
+    const add = (scope, name, dir) => { const i = store.lockInfo(dir); if (i) res.push(Object.assign({ scope, name }, i)); };
+    add(null, 'registry', path.join(store.appHome(), 'registry.lock'));
+    for (const s of this.listScopes()) {
+      add(s.id, 'scope', path.join(s.home, 'lock'));
+      add(s.id, 'create', path.join(s.home, 'create.lock'));
+    }
+    return res;
+  }
+
+  /** Remove a lock. Without force only stale locks (holder gone / no heartbeat) are removed. */
+  releaseLock(lockDir, { force = false } = {}) {
+    const i = store.lockInfo(lockDir);
+    if (!i) return { released: false, reason: '잠금이 없습니다.' };
+    if (!i.stale && !force) return { released: false, reason: `"${i.op}" 이(가) 아직 진행 중입니다 (pid ${i.pid}).` };
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    store.touchEvents({ lock: 'released' });
+    return { released: true };
+  }
+
+  /** Scope-wide lock for operations that change the SVN working copy or the svn-base branch. */
+  _scopeLock(scope, op, fn) {
+    return store.withLock(path.join(scope.home, 'lock'), fn, { op });
+  }
+
+  /** Make sure the svn-base snapshot exists; concurrent callers run the snapshot only once. */
+  async _ensureBase(scope) {
+    const git = await this.git(scope);
+    if (await git.revParse(BASE_REF)) return;
+    await store.withLock(path.join(scope.home, 'lock'), async () => {
+      if (await git.revParse(BASE_REF)) return; // another caller did it while we waited
+      await this._snapshot(scope, {});
+    }, { op: `${scope.id}: 첫 SVN 기준 읽기 (snapshot)` });
+  }
+
+  /**
+   * Create a task: branch + linked worktree from svn-base.
+   * Only the quick registration runs under a lock; the (possibly long) checkout of the scope's files
+   * runs outside it, so several agents creating tasks at the same time work in parallel.
+   */
+  async createTask(scopeRef, { title, description = '' } = {}) {
     if (!title || !String(title).trim()) throw new Error('title 이 필요합니다.');
     const scope = this.resolveScope(scopeRef);
     const git = await this.git(scope);
-    if (!(await git.revParse(BASE_REF))) await this.refreshScope(scope.id);
-    return store.withLock(path.join(scope.home, 'lock'), async () => {
-      const no = await store.withLock(path.join(store.appHome(), 'registry.lock'), async () => {
-        const reg = store.loadRegistry();
-        const n = reg.nextTaskNo || 1;
-        reg.nextTaskNo = n + 1;
-        store.saveRegistry(reg);
-        return n;
-      });
-      const slug = slugify(title);
-      const id = slug ? `${no}-${slug}` : `${no}`;
-      const branch = `task/${id}`;
-      const worktree = path.join(scope.worktreeRoot, id);
-      if (fs.existsSync(worktree)) throw new Error(`worktree 경로가 이미 존재합니다: ${worktree}`);
-      const workPath = scope.linkOutside && scope.relPath ? fromPosix(worktree, scope.relPath) : worktree;
-      const links = [];
-      if (scope.linkOutside && scope.relPath) {
-        // Mirror the WC layout: junction every sibling directory of every ancestor so relative paths
-        // such as ../common/include keep working. Linked content is the live SVN working copy (read only by convention).
-        const segs = scope.relPath.split('/');
-        let orig = scope.wcRoot;
-        let mirror = worktree;
-        for (const seg of segs) {
-          store.ensureDir(mirror);
-          for (const ent of fs.readdirSync(orig, { withFileTypes: true })) {
-            if (ent.name === seg || ent.name === '.svn') continue;
-            const src = path.join(orig, ent.name);
-            const dst = path.join(mirror, ent.name);
-            try {
-              if (ent.isDirectory()) { fs.symlinkSync(src, dst, 'junction'); links.push({ type: 'junction', path: dst, target: src }); }
-              else if (ent.isFile()) { fs.copyFileSync(src, dst); links.push({ type: 'copy', path: dst, target: src }); }
-            } catch (_) { /* skip */ }
-          }
-          orig = path.join(orig, seg);
-          mirror = path.join(mirror, seg);
+    await this._ensureBase(scope);
+    const no = await store.withLock(path.join(store.appHome(), 'registry.lock'), async () => {
+      const reg = store.loadRegistry();
+      const n = reg.nextTaskNo || 1;
+      reg.nextTaskNo = n + 1;
+      store.saveRegistry(reg);
+      return n;
+    }, { op: '작업 번호 발급', timeoutMs: 120000 });
+    const slug = slugify(title);
+    const id = slug ? `${no}-${slug}` : `${no}`;
+    const branch = `task/${id}`;
+    const worktree = path.join(scope.worktreeRoot, id);
+    if (fs.existsSync(worktree)) throw new Error(`worktree 경로가 이미 존재합니다: ${worktree}`);
+    const workPath = scope.linkOutside && scope.relPath ? fromPosix(worktree, scope.relPath) : worktree;
+    const links = [];
+    if (scope.linkOutside && scope.relPath) {
+      // Mirror the WC layout: junction every sibling directory of every ancestor so relative paths
+      // such as ../common/include keep working. Linked content is the live SVN working copy (read only by convention).
+      const segs = scope.relPath.split('/');
+      let orig = scope.wcRoot;
+      let mirror = worktree;
+      for (const seg of segs) {
+        store.ensureDir(mirror);
+        for (const ent of fs.readdirSync(orig, { withFileTypes: true })) {
+          if (ent.name === seg || ent.name === '.svn') continue;
+          const src = path.join(orig, ent.name);
+          const dst = path.join(mirror, ent.name);
+          try {
+            if (ent.isDirectory()) { fs.symlinkSync(src, dst, 'junction'); links.push({ type: 'junction', path: dst, target: src }); }
+            else if (ent.isFile()) { fs.copyFileSync(src, dst); links.push({ type: 'copy', path: dst, target: src }); }
+          } catch (_) { /* skip */ }
         }
+        orig = path.join(orig, seg);
+        mirror = path.join(mirror, seg);
       }
-      store.ensureDir(path.dirname(workPath));
-      const r = await git.raw(['worktree', 'add', '-b', branch, workPath, BASE_REF]);
+    }
+    store.ensureDir(path.dirname(workPath));
+    // 1) register worktree + branch (fast, serialized per scope)
+    await store.withLock(path.join(scope.home, 'create.lock'), async () => {
+      const r = await git.raw(['worktree', 'add', '--no-checkout', '-b', branch, workPath, BASE_REF]);
       if (r.code !== 0) throw new Error(`git worktree add 실패: ${decode(r.stderr)}`);
-      const base = await git.revParse(BASE_REF);
-      const task = {
-        id, no, scopeId: scope.id, title: String(title).trim(), description,
-        branch, worktree, workPath, links,
-        changelist: `svnwt-${id}`,
-        status: 'active', baseCommit: base, baseRevision: scope.revision,
-        createdAt: now(), updatedAt: now(), landed: null,
-      };
-      this._saveTask(scope, task);
-      return task;
-    });
+    }, { op: `작업 #${no} worktree 등록`, timeoutMs: 5 * 60 * 1000 });
+    // 2) check out the files (slow for big folders; parallel across tasks)
+    const co = await git.raw(['reset', '--hard', '-q'], { cwd: workPath });
+    if (co.code !== 0) throw new Error(`worktree 파일 체크아웃 실패 (${workPath}): ${decode(co.stderr)}`);
+    const base = decode((await git.raw(['rev-parse', 'HEAD'], { cwd: workPath })).stdout).trim();
+    const task = {
+      id, no, scopeId: scope.id, title: String(title).trim(), description,
+      branch, worktree, workPath, links,
+      changelist: `svnwt-${id}`,
+      status: 'active', baseCommit: base, baseRevision: scope.revision,
+      createdAt: now(), updatedAt: now(), landed: null,
+    };
+    this._saveTask(scope, task);
+    return task;
   }
 
   async _worktreeState(scope, task) {
@@ -636,7 +692,7 @@ class Service {
       if (!autoCommit) throw new Error(`worktree 에 커밋되지 않은 변경이 ${wt.dirty.length}개 있습니다. svnwt_task_commit 으로 커밋하거나 autoCommit=true 를 사용하세요.`);
       if (!dryRun) await this.commitTask(task.id, `${task.title} (auto commit before changelist)`);
     }
-    return store.withLock(path.join(scope.home, 'lock'), async () => {
+    return this._scopeLock(scope, `작업 #${task.no} SVN changelist 반영`, async () => {
       const { tip, base } = await this._range(scope, task);
       const changes = await git.nameStatus(base, tip);
       const lastLanded = task.landed && task.landed.commit && (await git.revParse(task.landed.commit)) ? task.landed.commit : null;
@@ -799,7 +855,7 @@ class Service {
     this._assertNoCommitInProgress(scope);
     const git = await this.git(scope);
     const svn = await this.svn();
-    return store.withLock(path.join(scope.home, 'lock'), async () => {
+    return this._scopeLock(scope, `작업 #${task.no} SVN 반영 되돌리기`, async () => {
       const { commit, base, files } = task.landed;
       const stList = await svn.status(scope.svnPath);
       const st = new Map(stList.map((e) => [key(e.path), e]));

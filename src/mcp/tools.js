@@ -18,10 +18,11 @@ const TOOLS = [
       if (!envInfo.ok) return { ok: false, problems: envInfo.problems };
       const paths = a.path ? [a.path] : ctx.workspaceFolders;
       const locations = paths.map((p) => ({ path: p, ...svc.mapPath(p) }));
-      const scopes = svc.listScopes().map((s) => ({ id: s.id, svnPath: s.svnPath, revision: s.revision, url: s.url }));
+      const scopes = svc.listScopes().map((s) => ({ id: s.id, svnPath: s.svnPath, revision: s.revision, url: s.url, lastSnapshot: s.lastSnapshot || null }));
       const tasks = svc.listTasks().map((t) => ({ id: t.id, scope: t.scopeId, title: t.title, status: t.status, workPath: t.workPath, changelist: t.changelist }));
+      const locks = svc.locks().map((l) => ({ scope: l.scope, lock: l.name, op: l.op, pid: l.pid, runningSec: Math.round(l.since / 1000), holderAlive: l.alive, stale: l.stale }));
       return {
-        ok: true, git: envInfo.git.version, svn: envInfo.svn.version, locations, scopes, tasks,
+        ok: true, git: envInfo.git.version, svn: envInfo.svn.version, locations, scopes, tasks, locks,
         hint: scopes.length === 0
           ? 'No scope yet: ask the user which SVN folder to manage, then call svnwt_scope_init.'
           : 'Create a task with svnwt_task_create (or reuse an active one) and edit only inside its workPath.',
