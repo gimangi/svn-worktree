@@ -462,6 +462,26 @@ async function main() {
   assert.strictEqual(s.resolveTask(SC.id).task.status, 'active');
   ok('커밋 준비 → 취소: working copy (changes, changelists, unversioned file) back exactly as it was');
 
+  { // VS Code stopped in the middle of 커밋 준비 (task partly applied, marker still "stashing"): the next start restores
+    const pi = await s.stashCommit(SC.id);
+    assert(pi.ok, JSON.stringify(pi));
+    const mf = path.join(scope.home, 'commit-in-progress.json');
+    const mk = JSON.parse(fs.readFileSync(mf, 'utf8'));
+    delete mk.revs;
+    mk.phase = 'stashing';
+    fs.writeFileSync(mf, JSON.stringify(mk, null, 2));
+    const fixedTask = path.join(scope.home, 'tasks', SC.id + '.json');
+    const tj = JSON.parse(fs.readFileSync(fixedTask, 'utf8'));
+    tj.status = 'active';
+    tj.landed = null;
+    fs.writeFileSync(fixedTask, JSON.stringify(tj, null, 2));
+    const rec = await s.endCommit(SC.id);
+    assert(!rec.committed && !rec.kept.length && !rec.errors.length, JSON.stringify(rec));
+    assert.strictEqual(R(spPath), before);
+    assert.deepStrictEqual(stSet(), stSet(svnBefore));
+    assert.strictEqual(s.resolveTask(SC.id).task.status, 'active');
+    ok('커밋 준비 stopped half way (VS Code restarted): task taken back out, everything set aside restored');
+  }
   const pq = await s.stashCommit(Q1.id);
   assert(pq.ok, JSON.stringify(pq));
   assert(!/--- Changelist/.test(svn('status', appDir)), 'no changelist while committing: TortoiseSVN checks every file');

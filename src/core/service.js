@@ -1322,7 +1322,9 @@ class Service {
       entries.push(ent);
     }
     try { const d = await svn.raw(['diff', root]); if (d.code === 0 && d.stdout.length) fs.writeFileSync(path.join(dir, 'working-copy.diff'), d.stdout); } catch (_) { /* extra copy only */ }
-    const marker = { kind: 'stash', task: task.id, at: now(), pid: process.pid, external: true, stash: dir, entries, prevStatus: task.status, prevLanded: task.landed || null };
+    // phase "stashing" until this task is on the working copy: if VS Code stops in between, the next start puts
+    // everything back (see recoverCommits / the extension's activation)
+    const marker = { kind: 'stash', phase: 'stashing', task: task.id, at: now(), pid: process.pid, external: true, stash: dir, entries, prevStatus: task.status, prevLanded: task.landed || null };
     store.writeJson(this._markerFile(scope), marker);
     store.touchEvents({ scope: scope.id, task: task.id, commit: 'begin' });
     try {
@@ -1336,8 +1338,9 @@ class Service {
       const inCl = entries.filter((e) => e.changelist && fs.existsSync(e.path)).map((e) => e.path);
       if (inCl.length) await svn.withTargets(['changelist', '--remove'], inCl, { okCodes: [1] });
 
+      // the status is not touched here (a status change makes the extension add/remove workspace folders, which
+      // can restart VS Code's extension host in the middle of this)
       task.landed = null;
-      task.status = 'active';
       this._saveTask(scope, task);
       const r = await this.landTask(task.id, { inStash: true });
       if (!r.ok) {
@@ -1349,6 +1352,7 @@ class Service {
       const inOwn = (await svn.status(root)).filter((e) => e.changelist === fresh.changelist).map((e) => e.path);
       if (inOwn.length) await svn.withTargets(['changelist', '--remove'], inOwn, { okCodes: [1] });
       marker.revs = await this._lastChangedRevs(scope, fresh.landed.files);
+      marker.phase = 'ready';
       store.writeJson(this._markerFile(scope), marker);
       const help = await this.commitHelp(scope, fresh);
       return {
@@ -1367,8 +1371,18 @@ class Service {
     const root = scope.wcRoot || scope.svnPath;
     const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
     let committed = false;
-    if (task.landed) {
-      if (m.revs) committed = await this.commitDone(task.id);
+    if (!m.revs) {
+      // stopped before the task was fully applied: take back whatever of it is in the working copy
+      const mine = await this._taskPaths(scope, task).catch(() => new Set());
+      const saved = new Set(m.entries.map((e) => key(e.path)));
+      const st0 = await svn.status(root);
+      const partial = st0.filter((e) => mine.has(relPosix(scope.svnPath, e.path)) && CHANGED.includes(e.item));
+      if (partial.length) await svn.withTargets(['revert', '--depth', 'infinity'], partial.map((e) => e.path), { okCodes: [1] });
+      for (const e of partial.filter((x) => x.item === 'added' && !saved.has(key(x.path)))) { try { fs.rmSync(e.path, { recursive: true, force: true }); } catch (_) { /* ignore */ } }
+      const cl0 = (await svn.status(root)).filter((e) => e.changelist === task.changelist && !saved.has(key(e.path))).map((e) => e.path);
+      if (cl0.length) await svn.withTargets(['changelist', '--remove'], cl0, { okCodes: [1] });
+    } else if (task.landed) {
+      committed = await this.commitDone(task.id);
       // what is left of the task (cancelled, or files left unchecked) goes: it is all in git
       const st = await svn.status(root);
       const mine = new Set(task.landed.files.map((f) => key(fromPosix(scope.svnPath, f))));

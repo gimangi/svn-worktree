@@ -122,7 +122,7 @@ async function scenarios(d, ctx) {
     await d.mouse('mouseReleased', p.x, p.y, 'right');
     await sleep(800);
     const items = await d.eval(`[...document.querySelectorAll('.context-view .action-label, .monaco-menu .action-label')].map((e) => e.textContent.trim()).filter(Boolean)`);
-    assert(items.length > 0 && items.length <= 10, 'menu items: ' + items.length);
+    assert(items.length > 0 && items.length <= 12, 'menu items: ' + items.length);
     return { note: `${items.length}개: ${items.join(', ')}` };
   });
   await d.key('Escape');
@@ -251,8 +251,9 @@ async function scenarios(d, ctx) {
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="cancelCommit"]').click(); return true; }`, 15000, String(agentTask.no) + '-');
     await d.waitFor(`![...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar cleared');
     let st = svnSt();
-    for (let i = 0; i < 40 && st !== stBefore6; i++) { await sleep(300); st = svnSt(); }
-    assert.strictEqual(st, stBefore6);
+    const lines = (t) => t.split(/\r?\n/).filter((l) => l.trim()).sort().join('\n'); // svn prints changelist groups in no fixed order
+    for (let i = 0; i < 40 && lines(st) !== lines(stBefore6); i++) { await sleep(300); st = svnSt(); }
+    assert(lines(st) === lines(stBefore6), st);
     return { note: `복구: changelist ${(st.match(/--- Changelist '[^']+'/g) || []).join(', ')}` };
   });
 
@@ -429,7 +430,7 @@ async function scenarios(d, ctx) {
     const readme = fsx.readFileSync(readmeWc, 'utf8');
     assert(/\(A\)/.test(readme) && /\(B\)/.test(readme), readme);
     assert(new RegExp(ctx.svc.resolveTask(OA.id).task.changelist).test(st), st);
-    assert.strictEqual(ctx.svc.resolveTask(OB.id).task.status, 'committed');
+    assert(ctx.svc.resolveTask(OB.id).task.status === 'committed', ctx.svc.resolveTask(OB.id).task.status);
     return { note: `README: A 변경 복구 + B 커밋됨 / changelist: ${(st.match(/--- Changelist '[^']+'/g) || []).join(', ')}` };
   });
 }

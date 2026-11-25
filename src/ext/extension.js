@@ -934,7 +934,14 @@ async function activate(ctx) {
     try {
       // prepared external commit (the commit dialog may still be open): keep watching instead of undoing
       for (const m of service.pendingCommits().filter((x) => x.external)) {
-        try { watchExternalCommit(service.resolveTask(m.task).task); } catch (_) { /* task gone */ }
+        try {
+          const t = service.resolveTask(m.task).task;
+          if (m.kind === 'stash' && m.phase !== 'ready') {
+            // VS Code stopped in the middle of "커밋 준비": put everything back
+            const r = await service.endCommit(t.id);
+            vscode.window.showInformationMessage(`SVN Worktree: 중간에 멈춘 #${t.no} 커밋 준비를 되돌렸습니다 (빼 두었던 변경 ${r.restored}개 복구).${r.kept && r.kept.length ? ` 되돌리지 못한 파일은 보관본에 있습니다: ${r.stash}` : ''}`);
+          } else watchExternalCommit(t);
+        } catch (e) { log(`resume commit: ${e.message}`); }
       }
       const rec = await service.recoverCommits();
       for (const r of rec) {
