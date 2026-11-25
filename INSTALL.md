@@ -20,6 +20,8 @@ code --install-extension svn-worktree-0.3.1.vsix
 ```
 
 또는 VS Code 확장 보기 → `...` → *VSIX에서 설치…* → `svn-worktree-0.3.1.vsix`. 설치 후 VS Code 를 재시작합니다.
+
+> **주의**: `.vsix` 파일을 더블클릭하면 Visual Studio 의 *VSIX Installer* 가 열립니다 ("올바른 VSIX 패키지가 아닙니다" 등). 이 확장은 VS Code 용이므로 위 두 방법 중 하나로 **VS Code 에서** 설치하세요.
 의존 패키지가 없어 오프라인 환경에서도 그대로 설치됩니다.
 
 ## 설치 확인
