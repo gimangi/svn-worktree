@@ -1,0 +1,414 @@
+{
+  "name": "svn-worktree",
+  "displayName": "SVN Worktree (svnwt)",
+  "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
+  "version": "0.3.0",
+  "publisher": "svnwt",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "AI",
+    "Other"
+  ],
+  "keywords": [
+    "svn",
+    "subversion",
+    "worktree",
+    "copilot",
+    "mcp"
+  ],
+  "main": "./src/ext/extension.js",
+  "icon": "media/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "svnwt",
+        "label": "SVN Worktree"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "svnwt",
+          "title": "SVN Worktree",
+          "icon": "media/svnwt.svg"
+        }
+      ]
+    },
+    "views": {
+      "svnwt": [
+        {
+          "id": "svnwt.tasks",
+          "name": "작업",
+          "icon": "media/svnwt.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "svnwt.tasks",
+        "contents": "SVN working copy 안의 폴더를 scope로 등록하면 작업(task)마다 별도 worktree에서 작업할 수 있습니다.\n[폴더를 scope로 등록](command:svnwt.initScope)\n[환경 점검 (Git / SVN)](command:svnwt.checkEnvironment)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "svnwt.refresh",
+        "title": "새로 고침",
+        "category": "SVN Worktree",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "svnwt.initScope",
+        "title": "폴더를 scope로 등록",
+        "category": "SVN Worktree",
+        "icon": "$(root-folder)"
+      },
+      {
+        "command": "svnwt.refreshScope",
+        "title": "SVN 기준 다시 읽기",
+        "category": "SVN Worktree",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "svnwt.svnUpdateScope",
+        "title": "svn update 후 기준 갱신",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.removeScope",
+        "title": "scope 등록 해제",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.createTask",
+        "title": "새 작업",
+        "category": "SVN Worktree",
+        "icon": "$(add)"
+      },
+      {
+        "command": "svnwt.openReview",
+        "title": "리뷰 열기",
+        "category": "SVN Worktree",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "svnwt.openReviewNewTab",
+        "title": "리뷰를 새 탭으로 열기",
+        "category": "SVN Worktree",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "svnwt.openChanges",
+        "title": "모든 변경 사항 보기",
+        "category": "SVN Worktree",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "svnwt.askCopilotReview",
+        "title": "Copilot에게 리뷰 요청",
+        "category": "SVN Worktree",
+        "icon": "$(copilot)"
+      },
+      {
+        "command": "svnwt.syncTask",
+        "title": "최신 SVN 기준으로 rebase",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.land",
+        "title": "SVN changelist 만들기/갱신",
+        "category": "SVN Worktree",
+        "icon": "$(checklist)"
+      },
+      {
+        "command": "svnwt.unland",
+        "title": "SVN working copy에서 되돌리기",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.commitSvn",
+        "title": "SVN 커밋…",
+        "category": "SVN Worktree",
+        "icon": "$(repo-push)"
+      },
+      {
+        "command": "svnwt.commitSvnChoose",
+        "title": "SVN 커밋 (방법 선택)…",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.cancelCommit",
+        "title": "커밋 준비 취소 (되돌리기)",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.copyCommitCommand",
+        "title": "svn commit 명령 복사",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.openWorktree",
+        "title": "worktree 열기…",
+        "category": "SVN Worktree",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "svnwt.addToWorkspace",
+        "title": "worktree를 작업 영역에 추가",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.openInNewWindow",
+        "title": "worktree를 새 창에서 열기",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.revealWorktree",
+        "title": "파일 탐색기에서 worktree 열기",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.openTerminal",
+        "title": "worktree에서 터미널 열기",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.removeTask",
+        "title": "작업 삭제",
+        "category": "SVN Worktree",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "svnwt.checkEnvironment",
+        "title": "환경 점검 (Git / SVN)",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.installInstructions",
+        "title": "Copilot 지침 다시 설치",
+        "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.exportVisualStudio",
+        "title": "Visual Studio용 MCP 설정 내보내기",
+        "category": "SVN Worktree"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "svnwt.createTask",
+          "when": "view == svnwt.tasks",
+          "group": "navigation@1"
+        },
+        {
+          "command": "svnwt.refresh",
+          "when": "view == svnwt.tasks",
+          "group": "navigation@2"
+        },
+        {
+          "command": "svnwt.initScope",
+          "when": "view == svnwt.tasks",
+          "group": "1@1"
+        },
+        {
+          "command": "svnwt.checkEnvironment",
+          "when": "view == svnwt.tasks",
+          "group": "z@1"
+        },
+        {
+          "command": "svnwt.installInstructions",
+          "when": "view == svnwt.tasks",
+          "group": "z@2"
+        },
+        {
+          "command": "svnwt.exportVisualStudio",
+          "when": "view == svnwt.tasks",
+          "group": "z@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "svnwt.createTask",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "inline@1"
+        },
+        {
+          "command": "svnwt.createTask",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "1@1"
+        },
+        {
+          "command": "svnwt.refreshScope",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "1@2"
+        },
+        {
+          "command": "svnwt.svnUpdateScope",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "1@3"
+        },
+        {
+          "command": "svnwt.removeScope",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "9@1"
+        },
+        {
+          "command": "svnwt.land",
+          "when": "view == svnwt.tasks && viewItem == task.active",
+          "group": "inline@1"
+        },
+        {
+          "command": "svnwt.commitSvn",
+          "when": "view == svnwt.tasks && viewItem == task.landed",
+          "group": "inline@1"
+        },
+        {
+          "command": "svnwt.removeTask",
+          "when": "view == svnwt.tasks && viewItem == task.committed",
+          "group": "inline@1"
+        },
+        {
+          "command": "svnwt.openReview",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "group": "1@1"
+        },
+        {
+          "command": "svnwt.openReviewNewTab",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "group": "1@1b"
+        },
+        {
+          "command": "svnwt.openChanges",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "group": "1@2"
+        },
+        {
+          "command": "svnwt.askCopilotReview",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(active|landed)/",
+          "group": "1@3"
+        },
+        {
+          "command": "svnwt.land",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(active|landed)/",
+          "group": "2@1"
+        },
+        {
+          "command": "svnwt.commitSvn",
+          "when": "view == svnwt.tasks && viewItem == task.landed",
+          "group": "2@2"
+        },
+        {
+          "command": "svnwt.syncTask",
+          "when": "view == svnwt.tasks && viewItem == task.active",
+          "group": "2@3"
+        },
+        {
+          "command": "svnwt.unland",
+          "when": "view == svnwt.tasks && viewItem == task.landed",
+          "group": "2@4"
+        },
+        {
+          "command": "svnwt.openWorktree",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "group": "3@1"
+        },
+        {
+          "command": "svnwt.removeTask",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "group": "9@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "svnwt.initScope",
+          "when": "explorerResourceIsFolder",
+          "group": "7_svnwt@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "svnwt.addToWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.revealWorktree",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.openInNewWindow",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.openTerminal",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.copyCommitCommand",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.refresh",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.openReviewNewTab",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SVN Worktree",
+      "properties": {
+        "svnwt.gitPath": {
+          "type": "string",
+          "default": "",
+          "description": "git.exe 경로. 비우면 PATH와 Git for Windows 기본 설치 위치에서 찾습니다."
+        },
+        "svnwt.svnPath": {
+          "type": "string",
+          "default": "",
+          "description": "svn.exe 경로. 비우면 PATH, TortoiseSVN, SlikSVN 기본 위치에서 찾습니다."
+        },
+        "svnwt.addWorktreeToWorkspace": {
+          "type": "string",
+          "enum": [
+            "always",
+            "ask",
+            "never"
+          ],
+          "default": "always",
+          "description": "Copilot(MCP)이 작업을 만들면 해당 worktree 폴더를 현재 작업 영역에 추가합니다. Copilot이 worktree 파일을 편집하려면 작업 영역에 있어야 합니다."
+        },
+        "svnwt.installCopilotInstructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "VS Code 사용자 프로필에 Copilot 지침 파일(svnwt.instructions.md)을 설치해 모든 작업 영역에서 svnwt 워크플로를 따르도록 합니다."
+        },
+        "svnwt.commitTool": {
+          "type": "string",
+          "enum": [
+            "external",
+            "tortoise",
+            "vscode",
+            "ask"
+          ],
+          "enumDescriptions": [
+            "커밋 준비만 함: 사내 커밋 도구가 띄우는 TortoiseSVN 커밋 창에 이 작업 파일만 체크되도록 정리하고, 커밋이 감지되면 자동으로 원상복구",
+            "TortoiseSVN 커밋 창을 직접 띄움 (이 작업 파일과 커밋 메시지가 채워진 상태)",
+            "VS Code 확인 창에서 바로 svn commit",
+            "매번 선택"
+          ],
+          "default": "external",
+          "description": "\"SVN 커밋…\" 동작. 어느 방법이든 이 작업의 변경만 커밋되도록 다른 변경은 잠시 빼 두었다가 되돌립니다."
+        }
+      }
+    }
+  }
+}
