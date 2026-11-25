@@ -20,7 +20,7 @@ class ReviewPanel {
     if (existing) {
       if (newTab) existing.keep();
       existing.panel.reveal(undefined, preserveFocus);
-      existing.update(true);
+      existing.update();
       return existing;
     }
     const pv = ReviewPanel.preview;
@@ -54,7 +54,7 @@ class ReviewPanel {
       const home = this.ctx.service.resolveTask(taskId).scope.home;
       this.panel.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(home)] };
     } catch (_) { /* ignore */ }
-    this.update(true);
+    this.update();
   }
 
   static refreshAll() { for (const p of ReviewPanel.panels.values()) p.update(); }
@@ -73,7 +73,7 @@ class ReviewPanel {
       if (ReviewPanel.preview === this) ReviewPanel.preview = null;
     });
     this.panel.webview.onDidReceiveMessage((m) => this.onMessage(m));
-    this.update(true);
+    this.update();
   }
 
   async onMessage(m) {
@@ -103,7 +103,8 @@ class ReviewPanel {
         case 'discardLeftovers': return vscode.commands.executeCommand('svnwt.discardLeftovers', this.taskId);
         case 'rebaseLand': return vscode.commands.executeCommand('svnwt.rebaseAndLand', this.taskId);
         case 'openTask': return vscode.commands.executeCommand('svnwt.openReview', m.task);
-        case 'refresh': return this.update(true);
+        case 'refresh': return this.update();
+        case 'checkSvn': return vscode.commands.executeCommand('svnwt.checkSvn', this.taskId);
         case 'openArtifact': return vscode.commands.executeCommand('vscode.open', vscode.Uri.file(m.file), { preview: true, viewColumn: vscode.ViewColumn.Beside });
         case 'saveMessage':
           await c.service.saveCommitMessage(this.taskId, m.text);
@@ -235,6 +236,7 @@ class ReviewPanel {
         buttons = [['discardLeftovers', '남은 변경 버리기', 'primary'], ['remove', 'worktree 정리'], ['openChanges', '변경 사항 보기']];
       }
     }
+    if (['landed', 'committed'].includes(t.status) && !(info.commitInProgress && info.commitInProgress.mine)) buttons.push(['checkSvn', 'SVN 상태 확인']);
     const cmd = t.status === 'landed' && info.commit && !(info.commitInProgress && info.commitInProgress.mine)
       ? `<div class="sub"><a href="#" data-cmd="commitChoose">다른 방법으로 커밋…</a></div>` : '';
     return `<div class="next next-${esc(t.status)}"><div class="next-title">${esc(title)}</div><div class="next-text">${esc(text)}</div>

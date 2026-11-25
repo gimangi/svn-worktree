@@ -1619,6 +1619,24 @@ class Service {
     return task.status;
   }
 
+  /**
+   * Manual "SVN 상태 확인" (nothing checks SVN automatically): for one task, or every task waiting for a commit
+   * or marked committed. Committed? (커밋 대기 -> 커밋 완료), wrongly committed? (-> 커밋 대기 / 진행 중), leftovers.
+   */
+  async checkSvnState(ref) {
+    const list = ref ? [this.resolveTask(ref).task] : this.listTasks().filter((t) => t.status === 'landed' || t.status === 'committed');
+    const changed = [];
+    for (const t of list) {
+      const { scope, task } = this.resolveTask(t.id);
+      const before = task.status;
+      if (task.status === 'committed') { task.commitVerified = false; this._saveTask(scope, task); }
+      try { await this.taskInfo(task.id, { checkSvn: true }); } catch (_) { continue; }
+      const after = this.resolveTask(task.id).task;
+      if (after.status !== before) changed.push({ id: after.id, no: after.no, title: after.title, from: before, to: after.status });
+    }
+    return { checked: list.length, changed };
+  }
+
   /** Re-check every task marked committed (see _verifyCommitted). Returns the ones put back. */
   async reverifyCommitted() {
     const fixed = [];

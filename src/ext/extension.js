@@ -220,6 +220,15 @@ function registerCommands(ctx) {
   }));
 
   reg('svnwt.refresh', () => refreshAll());
+  reg('svnwt.checkSvn', async (arg) => {
+    const id = taskIdOf(arg);
+    const r = await withProgress(id ? 'SVN 상태 확인 중…' : '모든 작업의 SVN 상태 확인 중…', () => service.checkSvnState(id || undefined));
+    refreshAll();
+    const label = { active: '진행 중', landed: '커밋 대기', committed: '커밋 완료' };
+    vscode.window.showInformationMessage(r.changed.length
+      ? `SVN 상태 확인: ${r.changed.map((c) => `#${c.no} ${label[c.from] || c.from} → ${label[c.to] || c.to}`).join(', ')}`
+      : `SVN 상태 확인: 바뀐 작업 없음 (${r.checked}개 확인)`);
+  });
   reg('svnwt.checkEnvironment', () => checkEnvironment(true));
 
   reg('svnwt.initScope', async (uri) => {
@@ -863,21 +872,7 @@ function watchEvents(ctx) {
   }, 5000);
   ctx.subscriptions.push({ dispose: () => clearInterval(iv) });
 
-  // A changelist committed outside VS Code (TortoiseSVN, CLI) => mark the task committed.
-  let checking = false;
-  const iv2 = setInterval(async () => {
-    if (checking || !vscode.window.state.focused) return;
-    checking = true;
-    try {
-      for (const t of service.listTasks().filter((x) => x.status === 'landed')) {
-        try {
-          const r = await service.checkCommitted(t.id);
-          if (r.status === 'committed') { refreshAll(); offerUnblocked(t); }
-        } catch (_) { /* svn busy etc. */ }
-      }
-    } finally { checking = false; }
-  }, 60000);
-  ctx.subscriptions.push({ dispose: () => clearInterval(iv2) });
+  // SVN is not checked automatically: "SVN 상태 확인" (svnwt.checkSvn) does it on request.
 }
 
 function statusBar(ctx) {
@@ -947,12 +942,6 @@ async function activate(ctx) {
         else vscode.window.showInformationMessage(`SVN Worktree: 중단된 커밋(${r.task})에서 잠시 빼 둔 변경 ${r.restored}개 파일을 되돌렸습니다.${r.committed ? ' 커밋은 완료된 상태입니다.' : ''}`);
       }
     } catch (e) { log(`recover: ${e.message}`); }
-    try {
-      const fixed = await service.reverifyCommitted();
-      if (fixed.length) {
-        vscode.window.showInformationMessage(`SVN Worktree: SVN 에 커밋되지 않았는데 "커밋 완료" 로 표시돼 있던 작업 ${fixed.length}개를 되돌렸습니다: ${fixed.map((x) => `#${x.no} ${x.status === 'landed' ? '커밋 대기' : '진행 중'}`).join(', ')}`);
-      }
-    } catch (e) { log(`reverify: ${e.message}`); }
     refreshAll();
   }, (e) => log(e.message));
   try { setup.deployServer(ctx); } catch (e) { log(`server deploy: ${e.message}`); }

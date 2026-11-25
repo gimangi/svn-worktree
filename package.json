@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -62,6 +62,12 @@
         "title": "새로 고침",
         "category": "SVN Worktree",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "svnwt.checkSvn",
+        "title": "SVN 상태 확인",
+        "category": "SVN Worktree",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "svnwt.initScope",
@@ -291,6 +297,11 @@
           "command": "svnwt.locks",
           "when": "view == svnwt.tasks",
           "group": "z@0"
+        },
+        {
+          "command": "svnwt.checkSvn",
+          "when": "view == svnwt.tasks",
+          "group": "navigation@9"
         }
       ],
       "view/item/context": [
@@ -413,6 +424,11 @@
           "command": "svnwt.removeTask",
           "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
           "group": "9@1"
+        },
+        {
+          "command": "svnwt.checkSvn",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(landed|committed)/",
+          "group": "2@9"
         }
       ],
       "explorer/context": [

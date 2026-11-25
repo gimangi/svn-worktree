@@ -402,6 +402,12 @@ async function main() {
     assert(fixed.some((x) => x.id === FC.id && x.status === 'landed'), JSON.stringify(fixed));
     assert.strictEqual(s.resolveTask(FC.id).task.status, 'landed');
     assert.deepStrictEqual(await s.reverifyCommitted(), [], 'checked once');
+    const j2 = JSON.parse(fs.readFileSync(f, 'utf8'));
+    j2.status = 'committed';
+    j2.commitVerified = true;
+    fs.writeFileSync(f, JSON.stringify(j2, null, 2));
+    const man = await s.checkSvnState(FC.id);
+    assert(man.checked === 1 && man.changed.some((c) => c.id === FC.id && c.to === 'landed'), JSON.stringify(man));
   }
   svn('revert', '-q', lt2Path);
   assert.strictEqual((await s.checkCommitted(FC.id)).status, 'active', 'everything reverted by hand: back to active, not committed');

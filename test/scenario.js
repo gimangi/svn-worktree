@@ -241,7 +241,7 @@ async function main() {
 
   // phase 5: changelists
   await sleep(PACE);
-  const l1 = await H.tool('svnwt_task_changelist', { task: S });
+  const l1 = await humanLand({ task: S });
   assert(l1.ok, JSON.stringify(l1));
   log('사람(대행)', `작업 ${SN} changelist ${l1.changelist} (${l1.commit.files.join(', ')})`);
   await sleep(PACE);
