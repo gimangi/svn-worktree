@@ -447,6 +447,30 @@ function registerCommands(ctx) {
     if (a === '열기') vscode.window.showTextDocument(vscode.Uri.file(r.file));
   });
 
+  reg('svnwt.locks', async () => {
+    const locks = service.locks();
+    const snaps = service.listScopes().filter((sc) => sc.lastSnapshot)
+      .map((sc) => `${sc.id}: 마지막 SVN 기준 읽기 ${Math.round(sc.lastSnapshot.totalMs / 1000)}초 (파일 ${sc.lastSnapshot.files}개, svn status ${Math.round((sc.lastSnapshot.svnStatusMs || 0) / 1000)}초, 해시 ${Math.round((sc.lastSnapshot.hashFilesMs || 0) / 1000)}초)`);
+    if (!locks.length) {
+      vscode.window.showInformationMessage(`걸려 있는 잠금이 없습니다.${snaps.length ? '\n' + snaps.join('\n') : ''}`);
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(locks.map((l) => ({
+      label: `${l.stale ? '$(warning) 남은 잠금' : '$(sync~spin) 진행 중'} · ${l.op}`,
+      description: `${l.scope || '전체'} · ${store.fmtDuration(l.since)}째 · pid ${l.pid || '?'}${l.alive === false ? ' (종료됨)' : ''}`,
+      detail: l.lockDir, l,
+    })), { placeHolder: '해제할 잠금 선택 (남은 잠금은 바로 해제, 진행 중인 작업은 확인 후 강제 해제)' });
+    if (!pick) return;
+    let force = false;
+    if (!pick.l.stale) {
+      const a = await vscode.window.showWarningMessage(`"${pick.l.op}" 이(가) 아직 진행 중입니다 (pid ${pick.l.pid}). 강제로 해제하면 동시에 실행되어 결과가 꼬일 수 있습니다.`, { modal: true }, '강제 해제');
+      if (a !== '강제 해제') return;
+      force = true;
+    }
+    const r = service.releaseLock(pick.l.lockDir, { force });
+    vscode.window.showInformationMessage(r.released ? '잠금을 해제했습니다.' : r.reason);
+  });
+
   reg('svnwt.exportVisualStudio', async () => {
     const r = setup.exportVisualStudio(ctx);
     const a = await vscode.window.showInformationMessage(
