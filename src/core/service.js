@@ -686,12 +686,12 @@ class Service {
    * Apply the task onto the SVN working copy and put touched files into changelist svnwt-<id>.
    * @param {{dryRun?:boolean, autoCommit?:boolean, force?:boolean}} opts
    */
-  async landTask(ref, { dryRun = false, autoCommit = false, force = false, overwrite = false } = {}) {
+  async landTask(ref, { dryRun = false, autoCommit = false, force = false, overwrite = false, inStash = false } = {}) {
     const { scope, task } = this.resolveTask(ref);
     this._assertActive(task);
     const git = await this.git(scope);
     const svn = await this.svn();
-    this._assertNoCommitInProgress(scope);
+    if (!inStash) this._assertNoCommitInProgress(scope);
     const wt = await this._worktreeState(scope, task);
     if (wt.rebasing || wt.merging) throw new Error('sync(rebase/merge)가 진행 중입니다. 먼저 완료하세요.');
     if (wt.dirty.length) {
@@ -1174,24 +1174,23 @@ class Service {
   }
 
   /**
-   * Changelist request from an agent (MCP / @svnwt). The SVN working copy holds one task changelist at a time and
-   * only the human replaces it (the one in it may be under review or being committed): when another task is in
-   * it, this task is only marked ready.
+   * Changelist request from an agent (MCP / @svnwt): agents never touch the SVN working copy. The task is marked
+   * ready for review; the human's "커밋 준비" puts it (alone) on the working copy at commit time.
    */
   async requestChangelist(ref, opts = {}) {
     const { scope, task } = this.resolveTask(ref);
-    const occ = await this.wcOccupantsLive(task.id);
-    if (!occ.length) return this.landTask(task.id, opts);
-    const list = occ.map((o) => (o.no ? `#${o.no} "${o.title}"` : o.changelist)).join(', ');
-    const occupiedBy = occ.map((o) => ({ id: o.id, no: o.no, title: o.title, changelist: o.changelist }));
-    if (opts.dryRun) {
-      return { ok: false, dryRun: true, task: task.id, ready: true, occupiedBy,
-        message: `SVN 에 다른 작업(${list})이 있어 changelist 를 만들 수 없습니다. 그대로 호출하면 "리뷰 대기" 로 표시됩니다.` };
-    }
-    task.readyAt = now();
-    this._saveTask(scope, task);
-    return { ok: false, task: task.id, ready: true, occupiedBy,
-      message: `SVN 에 다른 작업(${list})이 있어 changelist 를 만들지 않고 "리뷰 대기" 로 표시했습니다. 바꾸는 것은 사용자가 리뷰 화면에서 합니다.` };
+    const git = await this.git(scope);
+    const wt = await this._worktreeState(scope, task);
+    if (wt.dirty.length && !opts.autoCommit) throw new Error(`worktree 에 커밋되지 않은 변경이 ${wt.dirty.length}개 있습니다. svnwt_task_commit 으로 커밋하거나 autoCommit=true 를 사용하세요.`);
+    if (wt.dirty.length && !opts.dryRun) await this.commitTask(task.id, `${task.title} (auto commit)`);
+    const { tip, base } = await this._range(scope, task);
+    const files = (await git.nameStatus(base, tip)).map((c) => ({ path: c.path, status: c.status }));
+    if (!opts.dryRun) { task.readyAt = now(); this._saveTask(scope, task); }
+    return {
+      ok: true, ready: true, dryRun: !!opts.dryRun, task: task.id, files,
+      message: opts.dryRun ? '호출하면 작업이 "리뷰 대기" 로 표시됩니다.'
+        : '작업을 "리뷰 대기" 로 표시했습니다. SVN working copy 는 사용자가 "커밋 준비" 를 누를 때 이 작업만 올려 커밋합니다.',
+    };
   }
 
   // ------------------------------------------------------------ leftovers after a partial commit
@@ -1272,6 +1271,184 @@ class Service {
       this._saveTask(scope, fresh);
       return { task: task.id, files: results };
     }, { op: `작업 ${task.id} 남은 변경 버리기` });
+  }
+
+  // ------------------------------------------------------------ commit: stash -> this task only -> restore
+  /**
+   * "커밋 준비" for ONE task. The work is in git, so the SVN working copy is only used for the commit:
+   * 1. every local change of the working copy (other tasks, the user's own edits, old changelists) is set aside:
+   *    copies + SVN BASE copies + svn state + changelists, and those files go back to SVN BASE
+   * 2. this task is applied from git onto the clean BASE as changelist svnwt-<id> (nothing else is changed, so
+   *    TortoiseSVN's commit dialog shows only this task)
+   * 3. after the commit (or cancel) endCommit takes the task back out and puts everything that was set aside back
+   * Only one thing can stop it: the task changes the same lines as something committed to SVN after the task
+   * started (rebase in the worktree first).
+   */
+  async stashCommit(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    if (!['active', 'landed'].includes(task.status)) throw new Error('진행 중인 작업만 커밋할 수 있습니다.');
+    this._assertNoCommitInProgress(scope);
+    const svn = await this.svn();
+    const git = await this.git(scope);
+    const root = scope.wcRoot || scope.svnPath;
+    const wt = await this._worktreeState(scope, task);
+    if (wt.rebasing || wt.merging) throw new Error('worktree 에서 rebase 가 진행 중입니다. 먼저 끝내세요.');
+    if (wt.dirty.length) await this.commitTask(task.id, `${task.title} (SVN 커밋 전 자동 커밋)`);
+    const { tip, base } = await this._range(scope, task);
+    const changes = await git.nameStatus(base, tip);
+    if (!changes.length) throw new Error('커밋할 변경이 없습니다.');
+    const taskAbs = new Set();
+    for (const c of changes) { taskAbs.add(key(fromPosix(scope.svnPath, c.path))); if (c.from) taskAbs.add(key(fromPosix(scope.svnPath, c.from))); }
+
+    const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
+    const st = await svn.status(root);
+    const dir = store.ensureDir(path.join(scope.home, 'stash', `${now().replace(/[:.]/g, '-')}-${task.id}`));
+    const entries = [];
+    let n = 0;
+    for (const e of st) {
+      const changed = CHANGED.includes(e.item);
+      const strayInTaskPath = e.item === 'unversioned' && taskAbs.has(key(e.path)); // would collide with a file the task adds
+      if (!changed && !e.changelist && !strayInTaskPath) continue;
+      let isDir = false;
+      try { isDir = fs.statSync(e.path).isDirectory(); } catch (_) { /* deleted */ }
+      const ent = { path: e.path, item: strayInTaskPath ? 'unversioned' : e.item, changelist: e.changelist || null, isDir };
+      if ((changed || strayInTaskPath) && !isDir) {
+        const cur = readFileOrNull(e.path);
+        if (cur !== null) { ent.copy = path.join(dir, String(n++)); fs.writeFileSync(ent.copy, cur); }
+        const baseContent = ['added', 'unversioned'].includes(ent.item) ? null : await svn.catBase(e.path);
+        if (baseContent !== null) { ent.base = path.join(dir, String(n++)); fs.writeFileSync(ent.base, baseContent); }
+      }
+      entries.push(ent);
+    }
+    try { const d = await svn.raw(['diff', root]); if (d.code === 0 && d.stdout.length) fs.writeFileSync(path.join(dir, 'working-copy.diff'), d.stdout); } catch (_) { /* extra copy only */ }
+    const marker = { kind: 'stash', task: task.id, at: now(), pid: process.pid, external: true, stash: dir, entries, prevStatus: task.status, prevLanded: task.landed || null };
+    store.writeJson(this._markerFile(scope), marker);
+    store.touchEvents({ scope: scope.id, task: task.id, commit: 'begin' });
+    try {
+      const changed = entries.filter((e) => CHANGED.includes(e.item));
+      const tops = changed.filter((e) => !changed.some((o) => o !== e && o.isDir && isInside(e.path, o.path) && key(o.path) !== key(e.path)));
+      if (tops.length) await svn.withTargets(['revert', '--depth', 'infinity'], tops.map((e) => e.path), { okCodes: [1] });
+      for (const e of entries.filter((x) => !x.isDir && ['added', 'unversioned'].includes(x.item))) { try { fs.unlinkSync(e.path); } catch (_) { /* gone */ } }
+      for (const e of changed.filter((x) => x.isDir && x.item === 'added').sort((a, b) => b.path.length - a.path.length)) {
+        try { fs.rmSync(e.path, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+      }
+      const inCl = entries.filter((e) => e.changelist && fs.existsSync(e.path)).map((e) => e.path);
+      if (inCl.length) await svn.withTargets(['changelist', '--remove'], inCl, { okCodes: [1] });
+
+      task.landed = null;
+      task.status = 'active';
+      this._saveTask(scope, task);
+      const r = await this.landTask(task.id, { inStash: true });
+      if (!r.ok) {
+        await this._endStash(scope, this.resolveTask(task.id).task, marker);
+        return { ok: false, task: task.id, blocked: r.blocked, needsRebase: !!r.needsRebase || (r.blocked || []).some((b) => b.needsRebase), errors: r.errors };
+      }
+      const fresh = this.resolveTask(task.id).task;
+      // only this task is changed in the working copy now: no changelist, so TortoiseSVN checks every file
+      const inOwn = (await svn.status(root)).filter((e) => e.changelist === fresh.changelist).map((e) => e.path);
+      if (inOwn.length) await svn.withTargets(['changelist', '--remove'], inOwn, { okCodes: [1] });
+      marker.revs = await this._lastChangedRevs(scope, fresh.landed.files);
+      store.writeJson(this._markerFile(scope), marker);
+      const help = await this.commitHelp(scope, fresh);
+      return {
+        ok: true, task: task.id, files: fresh.landed.files, setAside: entries.filter((e) => CHANGED.includes(e.item) || e.item === 'unversioned').length,
+        stash: dir, targets: help.targets, messageFile: help.messageFile, message: help.suggestedMessage,
+      };
+    } catch (e) {
+      try { await this._endStash(scope, this.resolveTask(task.id).task, marker); } catch (_) { /* reported below */ }
+      throw new Error(`커밋 준비 실패 (원래 상태로 되돌렸습니다, 보관본: ${dir}): ${e.message}`);
+    }
+  }
+
+  /** Take the task back out of the working copy and put everything that was set aside back. */
+  async _endStash(scope, task, m) {
+    const svn = await this.svn();
+    const root = scope.wcRoot || scope.svnPath;
+    const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
+    let committed = false;
+    if (task.landed) {
+      if (m.revs) committed = await this.commitDone(task.id);
+      // what is left of the task (cancelled, or files left unchecked) goes: it is all in git
+      const st = await svn.status(root);
+      const mine = new Set(task.landed.files.map((f) => key(fromPosix(scope.svnPath, f))));
+      const dirs = new Set((task.landed.dirs || []).map((d) => key(fromPosix(scope.svnPath, d))));
+      const pend = st.filter((e) => (mine.has(key(e.path)) || dirs.has(key(e.path))) && CHANGED.includes(e.item));
+      if (pend.length) await svn.withTargets(['revert', '--depth', 'infinity'], pend.map((e) => e.path), { okCodes: [1] });
+      for (const e of pend.filter((x) => x.item === 'added')) { try { fs.rmSync(e.path, { recursive: true, force: true }); } catch (_) { /* ignore */ } }
+      const cl = (await svn.status(root)).filter((e) => e.changelist === task.changelist).map((e) => e.path);
+      if (cl.length) await svn.withTargets(['changelist', '--remove'], cl, { okCodes: [1] });
+    }
+    // put back what was set aside
+    const kept = [];
+    const toAdd = [];
+    const toDelete = [];
+    for (const e of m.entries.filter((x) => x.isDir && x.item === 'added').sort((a, b) => a.path.length - b.path.length)) {
+      store.ensureDir(e.path);
+      toAdd.push(e.path);
+    }
+    for (const e of m.entries.filter((x) => !x.isDir && (CHANGED.includes(x.item) || x.item === 'unversioned'))) {
+      if (committed && e.changelist && e.changelist === task.changelist) continue;
+      const saved = e.copy ? fs.readFileSync(e.copy) : null;
+      const oldBase = e.base ? fs.readFileSync(e.base) : null;
+      const cur = readFileOrNull(e.path);
+      if (e.item === 'deleted' || e.item === 'missing') {
+        if (cur !== null && oldBase !== null && !bufEq(cur, oldBase)) { kept.push(e); continue; } // changed by the commit: keep it
+        if (e.item === 'deleted' && cur !== null) toDelete.push(e.path);
+        else if (cur !== null) { try { fs.unlinkSync(e.path); } catch (_) { /* ignore */ } }
+        continue;
+      }
+      let out;
+      if (cur === null || (oldBase !== null && bufEq(cur, oldBase))) out = saved; // nothing changed there meanwhile
+      else if (saved !== null && bufEq(cur, saved)) out = cur;
+      else if (oldBase === null || saved === null) out = undefined; // the commit created/changed it differently
+      else {
+        const mm = await this._merge3(scope, cur, oldBase, saved); // the commit is the new BASE: re-apply the saved change on top
+        out = mm.action === 'write' ? mm.content : (mm.action === 'none' ? cur : undefined);
+      }
+      if (out === undefined) { kept.push(e); continue; }
+      if (out !== null) { store.ensureDir(path.dirname(e.path)); fs.writeFileSync(e.path, out); }
+      if (e.item === 'added') toAdd.push(e.path);
+    }
+    const errors = [];
+    if (toAdd.length) { try { await svn.withTargets(['add', '--force', '--parents', '--depth', 'empty'], toAdd); } catch (err) { errors.push(err.message); } }
+    if (toDelete.length) { try { await svn.withTargets(['delete', '--force'], toDelete); } catch (err) { errors.push(err.message); } }
+    const groups = new Map();
+    for (const e of m.entries.filter((x) => x.changelist && (!committed || x.changelist !== task.changelist) && !x.isDir && fs.existsSync(x.path))) {
+      if (!groups.has(e.changelist)) groups.set(e.changelist, []);
+      groups.get(e.changelist).push(e.path);
+    }
+    for (const [cl, paths] of groups) { try { await svn.withTargets(['changelist', cl], paths, { okCodes: [1] }); } catch (err) { errors.push(err.message); } }
+    // svn stops at the first target it cannot handle (exit 1 = warning): check and redo one by one
+    if (groups.size) {
+      const now_ = new Map((await svn.status(root)).map((e) => [key(e.path), e.changelist || null]));
+      for (const [cl, paths] of groups) {
+        for (const p of paths) {
+          if (now_.get(key(p)) === cl) continue;
+          const r = await svn.raw(['changelist', cl, p]);
+          if (r.code !== 0) errors.push(`changelist ${cl} ${relPosix(root, p)}: ${decode(r.stderr).trim()}`);
+        }
+      }
+    }
+
+    fs.rmSync(this._markerFile(scope), { force: true });
+    if (!kept.length && !errors.length) fs.rmSync(m.stash, { recursive: true, force: true });
+    const fresh = this.resolveTask(task.id).task;
+    if (committed) {
+      fresh.status = 'committed';
+      fresh.committedAt = now();
+      fresh.leftovers = [];
+    } else {
+      // cancelled: back to exactly what it was (a changelist made by an earlier version stays)
+      fresh.status = m.prevStatus === 'landed' && m.prevLanded ? 'landed' : 'active';
+      fresh.landed = fresh.status === 'landed' ? m.prevLanded : null;
+      store.touchEvents({ scope: scope.id, task: task.id, commit: 'cancelled' });
+    }
+    this._saveTask(scope, fresh);
+    if (committed) { try { await this.refreshScope(scope.id); } catch (_) { /* best effort */ } }
+    return {
+      task: task.id, committed, restored: m.entries.length - kept.length,
+      kept: kept.map((e) => ({ path: relPosix(root, e.path), copy: e.copy || null })), stash: kept.length || errors.length ? m.stash : null, errors,
+    };
   }
 
   // ------------------------------------------------------------ split commit (one task at a time)
@@ -1451,6 +1628,7 @@ class Service {
     const { scope, task } = this.resolveTask(ref);
     const m = this._commitMarker(scope);
     if (!m || m.task !== task.id) return { task: task.id, committed: task.status === 'committed', restored: 0 };
+    if (m.kind === 'stash') return this._endStash(scope, task, m);
     const errors = [];
     let restored = 0;
     for (const f of m.files) {

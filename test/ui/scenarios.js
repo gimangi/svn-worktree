@@ -140,12 +140,13 @@ async function scenarios(d, ctx) {
   const S4 = '4. SVN 커밋 (사람, 커밋 준비 → TortoiseSVN)';
   const svnExe = (await require('../../src/core/env').detect()).svn.path;
   const svnSt = () => require('child_process').execFileSync(svnExe, ['status', ctx.wc], { encoding: 'utf8' });
-  await step({ scenario: S4, action: '"docs usage" 리뷰 화면 → "커밋 준비"', expect: '알림 + 상태 표시줄 "커밋 준비됨", 다른 변경은 ignore-on-commit 으로 이동' }, async () => {
+  await step({ scenario: S4, action: '"docs usage" 리뷰 화면 → "커밋 준비"', expect: '상태 표시줄 "커밋 준비됨", working copy 에는 이 작업 변경만 (다른 changelist 와 변경은 잠시 빼 둠), changelist 없음' }, async () => {
     await d.click('.monaco-list-row', 'docs usage');
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="commitSvn"]').click(); return true; }`, 8000, P.docs);
     await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 15000, 'status bar');
     const st = svnSt();
-    assert(/ignore-on-commit/.test(st), st);
+    const changed = st.split(/\r?\n/).filter((l) => /^[MAD]/.test(l));
+    assert(!/--- Changelist/.test(st) && changed.length && changed.every((l) => /docs|README/.test(l)), st);
     let title = '';
     for (let i = 0; i < 30 && title !== '커밋 준비됨'; i++) {
       title = await d.webview(`(doc) => doc.querySelector('.next-title').textContent`, 8000, P.docs);
@@ -229,44 +230,30 @@ async function scenarios(d, ctx) {
   });
 
   // ---------------------------------------------------------------- 6
-  const S6 = '6. changelist 만들기와 충돌 (사람이 버튼으로)';
-  const land = async () => {
-    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="land"]').click(); return true; }`, 8000, String(agentTask.no) + '-');
-    await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 10000, 'dialog');
-    return `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
-  };
-  await step({ scenario: S6, action: '새 작업 리뷰 → "SVN changelist 만들기" (다른 작업 changelist 3개가 있는 상태)', expect: '바꾸기 확인 창: 버릴 changelist 목록, 작업 내용은 git 에 남는다는 설명' }, async () => {
+  const S6 = '6. 커밋 준비: 다른 변경은 잠시 빼 두고 이 작업만';
+  let stBefore6 = '';
+  await step({ scenario: S6, action: '새 작업 리뷰 → "커밋 준비" (다른 작업 changelist 3개, 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '거부·확인 없이 바로 준비: working copy 에는 이 작업의 build.cmd 만, 상태 표시줄 "커밋 준비됨"' }, async () => {
+    stBefore6 = svnSt();
+    assert((stBefore6.match(/--- Changelist/g) || []).length >= 3 && /build\.cmd/.test(stBefore6), stBefore6);
     await d.click('.activitybar .action-item .action-label', 'SVN Worktree');
     await sleep(600);
     await d.click('.monaco-list-row', 'tools build script');
-    const note = await land();
-    assert(/바꿀까요/.test(note) && /report mul output/.test(note) && /git/.test(note), note);
-    return { note };
+    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="commitSvn"]').click(); return true; }`, 15000, String(agentTask.no) + '-');
+    await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar');
+    const st = svnSt();
+    const changed = st.split(/\r?\n/).filter((l) => /^[MAD?]/.test(l));
+    assert(!/--- Changelist/.test(st) && changed.length === 1 && /build\.cmd/.test(changed[0]), st);
+    const build = require('fs').readFileSync(path.join(ctx.wc, 'trunk', 'tools', 'build.cmd'), 'utf8');
+    assert(/echo clean/.test(build) && /echo done/.test(build), build);
+    return { note: `svn status: ${changed.join(' ')} / 알림: ${(await d.notifications()).join(' | ').slice(0, 200)}` };
   });
-  await step({ scenario: S6, action: '"바꾸기" 클릭 (사용자가 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '기존 changelist 는 버려지고, 거부 없이 "만들기" 확인 창 (겹치는 파일은 작업 내용으로 바꾸고 백업)' }, async () => {
-    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '바꾸기');
-    await d.waitFor(`[...document.querySelectorAll('.monaco-dialog-box .dialog-message-text, .monaco-dialog-box .dialog-message-detail')].some((e) => /백업/.test(e.textContent))`, 30000, 'confirm dialog');
-    const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
-    assert(/만들까요/.test(note) && /build\.cmd/.test(note), note);
-    const cls = (svnSt().match(/--- Changelist '([^']+)'/g) || []).length;
-    assert(cls === 0, 'other changelists dropped: ' + svnSt());
-    return { note };
-  });
-  await step({ scenario: S6, action: '"만들기" 클릭', expect: '트리: 이 작업만 "커밋 대기 · 1파일", 버린 작업은 "진행 중", 백업 위치 알림' }, async () => {
-    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '만들기');
-    let rows = [];
-    for (let i = 0; i < 60; i++) {
-      rows = await treeRows();
-      if (rows.some((r) => r.includes('tools build script') && /커밋 대기/.test(r))) break;
-      await sleep(300);
-    }
-    const row = rows.find((r) => r.includes('tools build script')) || '';
-    const other = rows.find((r) => r.includes('report mul output')) || '';
-    assert(/커밋 대기/.test(row) && /진행 중/.test(other), `${row} / ${other}`);
-    let notes = '';
-    for (let i = 0; i < 30 && !/백업/.test(notes); i++) { await sleep(300); notes = (await d.notifications()).join(' | '); }
-    assert(/백업/.test(notes), notes);
-    return { note: `${row.replace(/, has actions/, '')} / ${other.replace(/, has actions/, '')} / 알림: ${notes.slice(0, 200)}` };
+  await step({ scenario: S6, action: '"커밋 취소 (되돌리기)"', expect: '빼 두었던 changelist 3개와 직접 고친 내용이 그대로 돌아옴' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="cancelCommit"]').click(); return true; }`, 15000, String(agentTask.no) + '-');
+    await d.waitFor(`![...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar cleared');
+    let st = svnSt();
+    for (let i = 0; i < 40 && st !== stBefore6; i++) { await sleep(300); st = svnSt(); }
+    assert.strictEqual(st, stBefore6);
+    return { note: `복구: changelist ${(st.match(/--- Changelist '[^']+'/g) || []).join(', ')}` };
   });
 
   // ---------------------------------------------------------------- 7
@@ -398,56 +385,52 @@ async function scenarios(d, ctx) {
   });
 
   // ---------------------------------------------------------------- 9
-  const S9 = '9. changelist 는 하나만 (같은 줄을 고친 두 작업)';
+  const S9 = '9. 커밋까지 한 번에 (에이전트 작업 → 커밋 준비 → TortoiseSVN 커밋 → 복구)';
   const scopeId = 'demo';
   const OA = await ctx.svc.createTask(scopeId, { title: 'readme title A' });
   const OB = await ctx.svc.createTask(scopeId, { title: 'readme title B' });
-  for (const [t, v] of [[OA, 'A'], [OB, 'B']]) {
+  const editReadme = async (t, from, to) => {
     const f = path.join(t.workPath, 'app', 'README.md');
-    fsx.writeFileSync(f, fsx.readFileSync(f, 'utf8').replace('SVN Worktree 데모용 프로젝트입니다.', `SVN Worktree 데모용 프로젝트입니다 (${v}).`));
-    await ctx.svc.commitTask(t.id, `README ${v}`);
-  }
+    fsx.writeFileSync(f, fsx.readFileSync(f, 'utf8').replace(from, to));
+    await ctx.svc.commitTask(t.id, to);
+  };
+  await editReadme(OA, '# Demo app', '# Demo app (A)');
+  await editReadme(OB, 'SVN Worktree 데모용 프로젝트입니다.', 'SVN Worktree 데모용 프로젝트입니다 (B).');
   await ctx.svc.clearWorkingCopy(OA.id);
-  const la = await ctx.svc.landTask(OA.id);
+  const la = await ctx.svc.landTask(OA.id); // A has a changelist made the old way (like 0.3.x/0.4.0)
   assert(la.ok, 'land A: ' + JSON.stringify(la.blocked));
   const rqB = await ctx.svc.requestChangelist(OB.id);
-  assert(rqB.ready, 'agent request is only marked ready: ' + JSON.stringify(rqB));
-  await step({ scenario: S9, action: '에이전트가 changelist 를 요청했지만 다른 작업이 들어 있는 작업 (B) 리뷰 화면', expect: '트리와 리뷰 화면에 "리뷰 대기", 지금 SVN 에 반영된 작업 안내' }, async () => {
+  assert(rqB.ready, JSON.stringify(rqB));
+  const readmeWc = path.join(ctx.wc, 'trunk', 'app', 'README.md');
+  await step({ scenario: S9, action: '에이전트가 끝낸 작업 (B) 리뷰 화면', expect: '트리와 상태 상자에 "리뷰 대기", 주 버튼 "커밋 준비"' }, async () => {
     let row = '';
     for (let i = 0; i < 70 && !/리뷰 대기/.test(row); i++) { await sleep(300); row = (await treeRows()).find((r) => r.includes('readme title B')) || ''; }
     assert(/리뷰 대기/.test(row), row || 'row not visible');
     await d.click('.monaco-list-row', 'readme title B');
-    let notes = '';
-    for (let i = 0; i < 60 && !/바뀝니다/.test(notes); i++) {
+    let r = {};
+    for (let i = 0; i < 60 && r.title !== '리뷰 대기'; i++) {
       await sleep(300);
-      notes = await d.webview(`(doc) => doc.querySelector('.next-title').textContent + ' / ' + [...doc.querySelectorAll('.next .note')].map((n) => n.textContent).join(' ')`, 20000, String(OB.no) + '-').catch(() => notes);
+      r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent) })`, 20000, String(OB.no) + '-').catch(() => r);
     }
-    assert(/바뀝니다/.test(notes) && new RegExp(`#${OA.no}`).test(notes), notes);
-    return { note: `${row.replace(/, has actions/, '')} / ${notes}` };
+    assert(r.title === '리뷰 대기' && r.buttons[0] === '커밋 준비', JSON.stringify(r));
+    return { note: `${row.replace(/, has actions/, '')} / ${r.title} [${r.buttons.join(', ')}]` };
   });
-  await step({ scenario: S9, action: '"SVN changelist 만들기" 클릭', expect: '바꾸기 확인 창: 버릴 changelist 목록(A 포함), 작업 내용은 git 에 남는다는 설명' }, async () => {
-    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="land"]').click(); return true; }`, 15000, String(OB.no) + '-');
-    await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 15000, 'dialog');
-    const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
-    assert(/바꿀까요/.test(note) && /readme title A/.test(note) && /git/.test(note), note);
-    return { note };
+  await step({ scenario: S9, action: '"커밋 준비" 클릭', expect: 'working copy 에는 B 만 (A 의 changelist 는 잠시 빼 둠), changelist 없음' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="commitSvn"]').click(); return true; }`, 15000, String(OB.no) + '-');
+    await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar');
+    const readme = fsx.readFileSync(readmeWc, 'utf8');
+    assert(/\(B\)/.test(readme) && !/\(A\)/.test(readme) && !/--- Changelist/.test(svnSt()), readme + svnSt());
+    return { note: svnSt().split(/\r?\n/).filter((l) => /^[MAD?]/.test(l)).join(' ') };
   });
-  await step({ scenario: S9, action: '"바꾸기" 확인', expect: 'B 만 changelist (커밋 대기), A 는 진행 중으로 돌아감, SVN working copy 에는 B 의 줄만' }, async () => {
-    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '바꾸기');
-    let rows = [];
-    for (let i = 0; i < 100; i++) {
-      rows = await treeRows();
-      if (rows.some((r) => r.includes('readme title B') && /커밋 대기/.test(r)) && rows.some((r) => r.includes('readme title A') && /진행 중/.test(r))) break;
-      await sleep(300);
-    }
-    const rb = rows.find((r) => r.includes('readme title B')) || '';
-    const ra = rows.find((r) => r.includes('readme title A')) || '';
-    assert(/커밋 대기/.test(rb) && /진행 중/.test(ra), `${rb} / ${ra}`);
-    const readme = fsx.readFileSync(path.join(ctx.wc, 'trunk', 'app', 'README.md'), 'utf8');
-    assert(/\(B\)/.test(readme) && !/\(A\)/.test(readme), readme);
-    const cls = (svnSt().match(/--- Changelist '([^']+)'/g) || []).map((x) => x.replace(/--- Changelist '|'/g, ''));
-    assert(cls.length === 1 && cls[0] === ctx.svc.resolveTask(OB.id).task.changelist, cls.join(', '));
-    return { note: `${rb.replace(/, has actions/, '')} / ${ra.replace(/, has actions/, '')} / changelist: ${cls.join(', ')}` };
+  await step({ scenario: S9, action: 'TortoiseSVN 으로 커밋 (svn commit 대행) → 자동 감지', expect: '"SVN 커밋 완료" 알림, B 는 커밋 완료, 빼 두었던 A 의 changelist 와 변경이 새 기준 위에 돌아옴' }, async () => {
+    require('child_process').execFileSync(svnExe, ['commit', '-q', '-m', 'README B', ctx.wc]);
+    await d.waitFor(`[...document.querySelectorAll('.notifications-toasts .notification-list-item-message')].some((e) => /SVN 커밋 완료/.test(e.textContent))`, 30000, 'commit detected');
+    const st = svnSt();
+    const readme = fsx.readFileSync(readmeWc, 'utf8');
+    assert(/\(A\)/.test(readme) && /\(B\)/.test(readme), readme);
+    assert(new RegExp(ctx.svc.resolveTask(OA.id).task.changelist).test(st), st);
+    assert.strictEqual(ctx.svc.resolveTask(OB.id).task.status, 'committed');
+    return { note: `README: A 변경 복구 + B 커밋됨 / changelist: ${(st.match(/--- Changelist '[^']+'/g) || []).join(', ')}` };
   });
 }
 

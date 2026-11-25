@@ -206,7 +206,7 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { dry_run: { type: 'boolean' } } },
     async run(ctx, a) {
       const r = await ctx.service.requestChangelist(ctx.task.id, { dryRun: !!a.dry_run });
-      if (r.ready) return JSON.stringify({ ok: false, ready: true, message: r.message }, null, 1);
+      if (r.ready) return JSON.stringify({ ok: true, ready: true, files: r.files.map((f) => `${f.status} ${f.path}`), message: r.message }, null, 1);
       return JSON.stringify({ ok: r.ok, changelist: r.changelist, files: r.files.map((f) => `${f.action} ${f.path}${f.sharedWith ? ' (shared)' : ''}`), blocked: r.blocked, next: r.next }, null, 1);
     },
   },

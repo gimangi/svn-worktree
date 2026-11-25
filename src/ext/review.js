@@ -187,9 +187,9 @@ class ReviewPanel {
         title = '작업 중';
         text = '아직 커밋된 변경이 없습니다. Copilot 이 worktree 에서 작업하고 커밋하면 여기에 표시됩니다.';
       } else {
-        title = t.readyAt ? '리뷰 대기' : '리뷰 후 SVN changelist 만들기';
-        text = '변경을 SVN working copy 에 반영하고 이 작업 전용 changelist 로 묶습니다. SVN 커밋은 그 다음에 직접 합니다.';
-        buttons = [['land', 'SVN changelist 만들기', 'primary'], ['openChanges', '모든 변경 사항 보기'], ['askCopilot', 'Copilot 리뷰 요청']];
+        title = t.readyAt ? '리뷰 대기' : '리뷰 후 커밋 준비';
+        text = '커밋 준비를 누르면 SVN working copy 에 이 작업만 올립니다. 다른 로컬 변경은 커밋이 끝날 때까지 잠시 빼 두었다가 되돌립니다.';
+        buttons = [['commitSvn', '커밋 준비', 'primary'], ['openChanges', '모든 변경 사항 보기'], ['askCopilot', 'Copilot 리뷰 요청']];
       }
       const waitFor = info.waitFor || [];
       if (files.length && waitFor.length && !info.waitReady) {
@@ -202,10 +202,6 @@ class ReviewPanel {
         text = `기다리던 작업(${waitFor.map((w) => `#${w.no}`).join(', ')})이 ${waitFor.every((w) => w.status === 'committed') ? '커밋되었습니다' : '정리되었습니다'}. 최신 SVN 기준으로 rebase 한 뒤 changelist 를 만듭니다. 같은 줄을 고친 부분은 rebase 할 때 worktree 에서 정리해야 할 수 있습니다.`;
         buttons = [['rebaseLand', 'rebase 후 changelist 만들기', 'primary'], ['openChanges', '모든 변경 사항 보기']];
       }
-      const occ = info.occupants || [];
-      if (files.length && occ.length) {
-        notes.push(['info', `SVN 에 ${occ.map((o) => (o.no ? `#${o.no} "${o.title}"` : o.changelist)).join(', ')} 이(가) 반영돼 있습니다. 만들면 이 작업으로 바뀝니다.`]);
-      }
       if (!info.baseIsLatest && !waitFor.length) {
         notes.push(['info', `이 작업을 시작한 뒤 SVN 기준이 ${info.svnBaseCommitsBehind}번 갱신되었습니다. 충돌이 걱정되면 먼저 최신 기준으로 rebase 하세요.`]);
         buttons.push(['sync', '최신 SVN 기준으로 rebase']);
@@ -213,7 +209,7 @@ class ReviewPanel {
     } else if (t.status === 'landed' && info.commitInProgress && info.commitInProgress.mine) {
       title = '커밋 준비됨';
       text = info.commitInProgress.external
-        ? 'TortoiseSVN 커밋 창을 열어 커밋하세요. 이 작업의 파일만 체크돼 있고, 커밋 메시지는 클립보드에 있습니다. 커밋이 끝나면 자동으로 정리됩니다.'
+        ? 'TortoiseSVN 커밋 창을 열어 커밋하세요. 이 작업의 파일만 있고, 커밋 메시지는 클립보드에 있습니다. 빼 둔 다른 변경은 커밋이 끝나면 돌아옵니다.'
         : '커밋 진행 중입니다.';
       buttons = [['cancelCommit', '커밋 취소 (되돌리기)']];
     } else if (t.status === 'landed') {

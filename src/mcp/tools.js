@@ -107,7 +107,7 @@ const TOOLS = [
   },
   {
     name: 'svnwt_task_changelist',
-    description: 'Finish a task: 3-way apply its committed changes onto the SVN working copy and group the files into SVN changelist "svnwt-<id>" (svn add/delete/move included). The SVN working copy holds ONE task changelist at a time: if another task is in it, nothing is applied and the task is marked ready for review (ready=true) — the human switches it from the SVN Worktree panel. Does NOT commit. Run again after more commits to update the changelist.',
+    description: 'Finish a task: marks it ready for review (ready=true) and lists the files it changes. The SVN working copy is NOT touched: at commit time the human presses "커밋 준비", which puts only this task on the working copy as changelist "svnwt-<id>". Does NOT commit.',
     inputSchema: {
       type: 'object', required: ['task'], properties: {
         task: TASK, dryRun: bool('Only report what would happen.'), autoCommit: bool('Commit uncommitted worktree changes first.'),

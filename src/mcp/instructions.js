@@ -26,11 +26,9 @@ the same way an agent works on a git branch/worktree and opens a pull request.
    then call \`svnwt_task_attach_screenshots\` so the screens appear in the review panel. Test outputs
    (test-results/, playwright-report/, node_modules/) are excluded from commits automatically.
 7. When the work is done: review it (\`svnwt_task_review_get\`, then \`svnwt_task_review_submit\`), then call
-   \`svnwt_task_changelist\` to apply the task to the SVN working copy as changelist \`svnwt-<id>\`.
-   Use dryRun first if the SVN copy may have other local edits. The SVN working copy holds ONE task
-   changelist at a time: if another task is in it, the call returns ready=true and changes nothing. That is
-   fine — do not retry and do not unland the other task; tell the user the task is ready for review (they
-   switch the changelist from the review panel). Your work is safe in git either way.
+   \`svnwt_task_changelist\`. It marks the task ready for review and does not touch the SVN working copy:
+   at commit time the human presses "커밋 준비", which puts only this task on the working copy. Tell the user
+   the task is ready for review.
 8. NEVER run \`svn commit\`, \`svn revert\`, \`svn update\` or \`svn switch\` yourself. The human reviews the change
    in the "SVN Worktree" view (PR-like review) and commits there ("커밋 준비" / "SVN 커밋…"), which makes
    sure only this task's changes are committed. Tell the user the task is ready and where to commit it.

@@ -361,7 +361,7 @@ async function main() {
   }
   assert((await s.landTask(ON1.id)).ok);
   const rq = await s.requestChangelist(ON2.id);
-  assert(rq.ready && !rq.ok && rq.occupiedBy.some((o) => o.id === ON1.id), JSON.stringify(rq));
+  assert(rq.ready && rq.ok && rq.files.some((f) => f.path === 'lt.txt'), JSON.stringify(rq));
   assert(s.resolveTask(ON2.id).task.readyAt && s.resolveTask(ON1.id).task.status === 'landed');
   assert(/l5 ONE/.test(R(ltPath)));
   ok('agent changelist request while another task holds it: marked ready, nothing replaced');
@@ -410,6 +410,78 @@ async function main() {
   assert.strictEqual(clOf('lt.txt'), s.resolveTask(OW.id).task.changelist);
   ok('changelist from the UI: overlapping local content replaced by the task version (backed up), no refusal');
   await s.unlandTask(OW.id);
+
+  // ---------------------------------------------------------------- commit = stash everything, this task only, restore
+  const spPath = path.join(appDir, 'sp.txt');
+  W(spPath, crlf('s1\ns2\ns3\ns4\ns5\ns6\ns7\ns8\ns9\ns10\n'));
+  svn('add', '-q', spPath);
+  svn('commit', '-q', '-m', 'add sp', spPath);
+  svn('update', '-q', wc);
+  await s.refreshScope(scope.id);
+  const edT = (t, f, from, to) => { const p = path.join(t.workPath, f); fs.writeFileSync(p, R(p).replace(from, to)); };
+  const Q1 = await s.createTask(scope.id, { title: 'q1' });
+  const SP = await s.createTask(scope.id, { title: 'sp' });
+  const SR = await s.createTask(scope.id, { title: 'needs rebase' });
+  edT(Q1, 'sp.txt', 's7\r\n', 's7 Q1\r\n'); await s.commitTask(Q1.id, 'Q1');
+  edT(SP, 'sp.txt', 's2\r\n', 's2 SP\r\n'); edT(SP, 'sp.txt', 's5\r\n', 's5 SP\r\n');
+  fs.writeFileSync(path.join(SP.workPath, 'stray.txt'), 'from task\r\n'); await s.commitTask(SP.id, 'SP');
+  edT(SR, 'sp.txt', 's5\r\n', 's5 SR\r\n'); await s.commitTask(SR.id, 'SR');
+  assert((await s.landTask(Q1.id)).ok);
+  fs.writeFileSync(spPath, R(spPath).replace('s9\r\n', 's9 USER\r\n'));
+  fs.writeFileSync(path.join(appDir, 'stray.txt'), 'user stray\r\n'); // unversioned file where the task adds one
+  const before = R(spPath);
+  const svnBefore = svn('status', appDir);
+
+  // cancel: the working copy comes back exactly
+  const SC = await s.createTask(scope.id, { title: 'cancel me' });
+  edT(SC, 'sp.txt', 's3\r\n', 's3 SC\r\n'); await s.commitTask(SC.id, 'SC');
+  const pc = await s.stashCommit(SC.id);
+  assert(pc.ok, JSON.stringify(pc));
+  assert.strictEqual(R(spPath), crlf('s1\ns2\ns3 SC\ns4\ns5\ns6\ns7\ns8\ns9\ns10\n'), 'only this task in the working copy');
+  const cancel = await s.endCommit(SC.id);
+  assert(!cancel.committed && !cancel.kept.length && !cancel.errors.length, JSON.stringify(cancel));
+  if (svn('status', appDir) !== svnBefore) console.error('STATUS DIFF', JSON.stringify(cancel), '\nBEFORE\n' + svnBefore + '\nAFTER\n' + svn('status', appDir));
+  assert.strictEqual(R(spPath), before);
+  assert.strictEqual(svn('status', appDir), svnBefore);
+  assert.strictEqual(s.resolveTask(SC.id).task.status, 'active');
+  ok('커밋 준비 → 취소: working copy (changes, changelists, unversioned file) back exactly as it was');
+
+  const pq = await s.stashCommit(Q1.id);
+  assert(pq.ok, JSON.stringify(pq));
+  assert(!/--- Changelist/.test(svn('status', appDir)), 'no changelist while committing: TortoiseSVN checks every file');
+  assert.strictEqual(R(spPath), crlf('s1\ns2\ns3\ns4\ns5\ns6\ns7 Q1\ns8\ns9\ns10\n'));
+  await s.endCommit(Q1.id);
+  assert.strictEqual(s.resolveTask(Q1.id).task.status, 'landed');
+  assert.strictEqual(R(spPath), before);
+  assert.strictEqual(svn('status', appDir), svnBefore);
+  ok('커밋 준비 of a task that has an old changelist → 취소: its changelist and status come back');
+
+  // commit: same file as another changelist and the user's edit, no conflict anywhere
+  const pr = await s.stashCommit(SP.id);
+  assert(pr.ok, JSON.stringify(pr));
+  assert.strictEqual(R(spPath), crlf('s1\ns2 SP\ns3\ns4\ns5 SP\ns6\ns7\ns8\ns9\ns10\n'));
+  const pending = svn('status', appDir).split(/\r?\n/).filter((l) => /^[MAD?]/.test(l));
+  assert(pending.length === 2 && pending.every((l) => /sp\.txt|stray\.txt/.test(l)), pending.join(' | '));
+  assert(await s.stashCommit(Q1.id).then(() => false, () => true), 'one commit at a time');
+  svn('commit', '-q', '-m', 'sp', wc); // like TortoiseSVN: everything modified is this task (all checked)
+  assert(await s.commitDone(SP.id));
+  const done = await s.endCommit(SP.id);
+  assert(done.committed, JSON.stringify(done));
+  assert.strictEqual(R(spPath), crlf('s1\ns2 SP\ns3\ns4\ns5 SP\ns6\ns7 Q1\ns8\ns9 USER\ns10\n'), 'set-aside changes merged back on the new BASE');
+  assert.strictEqual(clOf('sp.txt'), s.resolveTask(Q1.id).task.changelist, 'changelist restored');
+  assert(done.kept.length === 1 && done.kept.some((k) => /stray\.txt$/.test(k.path)) && fs.readFileSync(done.kept[0].copy, 'utf8') === 'user stray\r\n', JSON.stringify(done.kept));
+  assert.strictEqual(s.resolveTask(SP.id).task.status, 'committed');
+  ok('커밋 준비 → 커밋: only this task committed; other changelist and user edit come back; colliding file kept aside');
+
+  // SVN moved on the same line: the only case that stops, and nothing changes
+  const beforeR = R(spPath);
+  const rr = await s.stashCommit(SR.id);
+  assert(!rr.ok && rr.needsRebase, JSON.stringify(rr));
+  assert.strictEqual(R(spPath), beforeR);
+  assert(!s.pendingCommits().length);
+  ok('same line as a newer SVN commit: needs rebase, working copy untouched');
+  await s.unlandTask(Q1.id);
+  svn('revert', '-q', spPath);
 
   // case-only rename of a versioned file via git mv (Windows: same file on disk)
   const CR = await s.createTask(scope.id, { title: 'case rename' });

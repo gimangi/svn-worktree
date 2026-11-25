@@ -24,7 +24,7 @@ function systemPrompt(scope, task) {
     '- Explore first (find_files, search, read_file), then make focused changes with edit_file. Keep the existing style, encoding and line endings; do not reformat unrelated code.',
     '- Build / run tests with run_command when the project has them. For UI tests (e.g. Playwright) call attach_screenshots afterwards.',
     '- Commit with git_commit after each logical step (clear message).',
-    '- When the task is complete: git_commit, then svn_changelist with dry_run=true, then svn_changelist. If it answers ready=true another task holds the single SVN changelist: that is fine, do not retry — say the task is ready for review. Never commit to SVN — the user commits from the SVN Worktree panel.',
+    '- When the task is complete: git_commit, then svn_changelist with dry_run=true, then svn_changelist (marks the task ready for review; the user presses "커밋 준비" to put it on SVN). Never commit to SVN — the user commits from the SVN Worktree panel.',
     '- If something is unclear or risky, stop and ask the user instead of guessing.',
     '- End with a short summary: what changed (files), how it was verified, what is left.',
     "- Reply in the user's language (Korean if the user writes Korean).",

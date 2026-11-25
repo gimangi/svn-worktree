@@ -328,7 +328,8 @@ function registerCommands(ctx) {
     }
   });
 
-  reg('svnwt.land', async (arg) => {
+  reg('svnwt.land', async (arg) => prepareCommit(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
+  reg('svnwt.landInPlace', async (arg) => {
     const t = await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed');
     const info = await service.taskInfo(t.id, { checkSvn: false });
     let autoCommit = false;
@@ -425,7 +426,7 @@ function registerCommands(ctx) {
     vscode.window.showInformationMessage(`되돌림 완료${c.length ? ` (수동 확인 필요: ${c.map((x) => x.path).join(', ')})` : ''}`);
   });
 
-  reg('svnwt.commitSvn', async (arg) => commitTaskToSvn(await pickTask(arg, (x) => x.status === 'landed')));
+  reg('svnwt.commitSvn', async (arg) => prepareCommit(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
   reg('svnwt.commitSvnChoose', async (arg) => commitTaskToSvn(await pickTask(arg, (x) => x.status === 'landed'), 'ask'));
   reg('svnwt.cancelCommit', async (arg) => {
     const pending = service.pendingCommits();
@@ -581,7 +582,8 @@ async function commitTaskToSvn(t, mode) {
   }
 
   const setAsideText = split ? `\n\n커밋하는 동안 잠시 빼 두는 변경 (커밋 후 그대로 돌아옵니다):\n${plan.setAside.map((x) => `  ${x.path} — ${x.reason}`).join('\n')}` : '';
-  if (mode === 'prepare') {
+  if (mode === 'prepare') return prepareCommit(t);
+  if (mode === 'prepareLegacy') {
     const begun = await withProgress(`#${t.no} 커밋 준비 중…`, () => service.beginCommit(t.id, { external: true }));
     await vscode.env.clipboard.writeText(fs.readFileSync(begun.messageFile, 'utf8').trim());
     refreshAll();
@@ -679,7 +681,40 @@ async function offerUnblocked(t) {
   else vscode.commands.executeCommand('svnwt.openReview', list[0].id);
 }
 
+/**
+ * 커밋 준비: set every local change of the SVN working copy aside, put only this task (from git) on the clean
+ * SVN BASE, wait for the commit (TortoiseSVN), then put everything back (watchExternalCommit -> endCommit).
+ */
+async function prepareCommit(t) {
+  if (!t) return undefined;
+  const info = await service.taskInfo(t.id, { checkSvn: false });
+  if (info.worktree && info.worktree.dirty.length) {
+    const a = await vscode.window.showWarningMessage(`#${t.no}: worktree 에 git 커밋되지 않은 변경 ${info.worktree.dirty.length}개가 있습니다. 같이 올릴까요?`, { modal: true }, '같이 올리기');
+    if (!a) return undefined;
+  }
+  const r = await withProgress(`#${t.no} 커밋 준비 중…`, () => service.stashCommit(t.id)).finally(refreshAll);
+  if (!r.ok) {
+    const a = await vscode.window.showWarningMessage(`#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다.`, {
+      modal: true,
+      detail: `${(r.blocked || []).map((b) => `✗ ${b.path}`).join('\n')}\n\n최신 SVN 기준으로 rebase 한 뒤 다시 커밋 준비합니다. working copy 는 바뀌지 않았습니다.`,
+    }, 'rebase 후 커밋 준비');
+    if (a) return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
+    return undefined;
+  }
+  try { await vscode.env.clipboard.writeText(fs.readFileSync(r.messageFile, 'utf8').trim()); } catch (_) { /* no message file */ }
+  watchExternalCommit(t);
+  vscode.window.showInformationMessage(
+    `#${t.no} 커밋 준비 완료. TortoiseSVN 커밋 창에는 이 작업 파일 ${r.files.length}개만 있습니다. 커밋 메시지는 클립보드에 있습니다.` +
+    (r.setAside ? ` 다른 로컬 변경 ${r.setAside}개는 커밋이 끝나면 돌아옵니다.` : ''),
+    '커밋 취소').then((a) => { if (a) vscode.commands.executeCommand('svnwt.cancelCommit', t.id); });
+  return undefined;
+}
+
 async function afterCommit(t, res, output) {
+  if (res && res.kept && res.kept.length) {
+    vscode.window.showWarningMessage(`커밋 전에 빼 두었던 변경 중 ${res.kept.length}개는 커밋된 내용과 겹쳐 되돌리지 않았습니다: ${res.kept.map((k) => k.path).join(', ')}`, '보관본 열기')
+      .then((a) => { if (a && res.stash) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(res.stash)); });
+  }
   refreshAll();
   if (res && res.committed) offerUnblocked(t);
   if (res && res.committed) {

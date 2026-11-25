@@ -246,7 +246,7 @@ async function main() {
   log('사람(대행)', `작업 ${SN} changelist ${l1.changelist} (${l1.commit.files.join(', ')})`);
   await sleep(PACE);
   const rqA = await A.tool('svnwt_task_changelist', { task: tA.id });
-  assert(rqA.ready && !rqA.ok, 'agent must not replace another changelist: ' + JSON.stringify(rqA));
+  assert(rqA.ready, 'agent only marks the task ready: ' + JSON.stringify(rqA));
   const lA = await humanLand({ task: tA.id });
   assert(lA.ok, JSON.stringify(lA));
   const rep = lA.files.find((f) => f.path === 'app/src/report.cpp');
