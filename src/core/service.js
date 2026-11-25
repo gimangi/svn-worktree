@@ -569,7 +569,7 @@ class Service {
       if (checkSvn && JSON.stringify(res.leftovers) !== JSON.stringify(task.leftovers || [])) { task.leftovers = res.leftovers; this._saveTask(scope, task); }
     }
     Object.assign(res, this._order(scope, task));
-    if (task.status === 'active' || task.status === 'landed') res.occupants = this.wcOccupants(task.id);
+    if (task.status === 'active' || task.status === 'landed') res.occupants = checkSvn ? await this.wcOccupantsLive(task.id).catch(() => this.wcOccupants(task.id)) : this.wcOccupants(task.id);
     const marker = this._commitMarker(scope);
     if (marker) res.commitInProgress = { task: marker.task, at: marker.at, external: !!marker.external, mine: marker.task === task.id };
     return res;
@@ -686,7 +686,7 @@ class Service {
    * Apply the task onto the SVN working copy and put touched files into changelist svnwt-<id>.
    * @param {{dryRun?:boolean, autoCommit?:boolean, force?:boolean}} opts
    */
-  async landTask(ref, { dryRun = false, autoCommit = false, force = false } = {}) {
+  async landTask(ref, { dryRun = false, autoCommit = false, force = false, overwrite = false } = {}) {
     const { scope, task } = this.resolveTask(ref);
     this._assertActive(task);
     const git = await this.git(scope);
@@ -765,7 +765,7 @@ class Service {
         if (item.action === 'write' && ours !== null) {
           try { fs.accessSync(abs, fs.constants.W_OK); } catch (_) { item.action = 'conflict'; item.reason = '읽기 전용 파일 (svn:needs-lock 이면 먼저 svn lock 필요)'; }
         }
-        if (item.action === 'conflict' && !item.waitFor && (!s || s.item === 'normal') && behind > 0 && /로컬 변경과 충돌/.test(item.reason || '')) {
+        if (item.action === 'conflict' && !item.waitFor && (!s || s.item === 'normal' || s.changelist === task.changelist) && behind > 0 && /로컬 변경과 충돌/.test(item.reason || '')) {
           // the working copy has no local edit here: the overlap is with what was committed to SVN since the task started
           item.reason = 'SVN 에 새로 커밋된 변경과 같은 부분을 수정함 — 최신 SVN 기준으로 rebase 필요';
           item.needsRebase = true;
@@ -782,8 +782,42 @@ class Service {
           dst.moveFrom = c.from;
         }
       }
+      // overwrite (the human's "changelist 만들기"): the changelist is disposable and the work is in git, so a
+      // file that overlaps other local content gets the task's version (SVN BASE + task change). The previous
+      // working-copy content is backed up. Only an overlap with what SVN itself has since then still blocks.
+      if (overwrite) {
+        for (const item of plan) {
+          if (!(item.action === 'conflict' || item.action === 'overlap') || item.needsRebase || item.moveFrom) continue;
+          if (/읽기 전용/.test(item.reason || '')) continue;
+          const ours = readFileOrNull(item.abs);
+          const versioned = !['none', 'unversioned', 'added'].includes(item.svnStatus);
+          const pristine = versioned ? await svn.catBase(item.abs) : null;
+          const baseBlob = await git.blob(base, item.path);
+          const tipBlob = await git.blob(tip, item.path);
+          let target;
+          if (pristine === null) target = tipBlob;
+          else {
+            const m2 = await this._merge3(scope, pristine, baseBlob, tipBlob);
+            if (m2.action === 'conflict') {
+              item.action = 'conflict';
+              item.needsRebase = true;
+              item.reason = 'SVN 에 새로 커밋된 변경과 같은 부분을 수정함 — 최신 SVN 기준으로 rebase 필요';
+              continue;
+            }
+            target = m2.action === 'write' ? m2.content : (m2.action === 'delete' ? null : pristine);
+          }
+          item.overwrite = true;
+          item.backup = ours;
+          item.reason = undefined;
+          delete item.waitFor;
+          delete item.sharedWith;
+          if (target === null) item.action = ours === null ? 'none' : 'delete';
+          else if (ours !== null && bufEq(target, ours)) item.action = 'none';
+          else { item.action = 'write'; item.content = target; }
+        }
+      }
       const blocked = plan.filter((p) => p.action === 'conflict' || p.action === 'overlap');
-      const summary = plan.map(({ path: p, action, merged, reason, svnStatus, moveFrom, sharedWith }) => ({ path: p, action, merged, reason, svnStatus, moveFrom, sharedWith }));
+      const summary = plan.map(({ path: p, action, merged, reason, svnStatus, moveFrom, sharedWith, overwrite: ow }) => ({ path: p, action, merged, reason, svnStatus, moveFrom, sharedWith, overwrite: ow || undefined }));
       // commit order: which other tasks must be committed before this one can be landed
       const waitIds = [...new Set(blocked.filter((b) => b.waitFor).map((b) => b.waitFor))];
       const waitFor = waitIds.map((id) => {
@@ -808,6 +842,16 @@ class Service {
       }
 
       const errors = [];
+      const overwritten = plan.filter((p) => p.overwrite && p.backup !== null && p.action !== 'none');
+      let backupDir = null;
+      if (overwritten.length) {
+        backupDir = store.ensureDir(path.join(scope.home, 'backups', `${now().replace(/[:.]/g, '-')}-${task.id}`));
+        for (const p of overwritten) {
+          const dst = path.join(backupDir, ...p.path.split('/'));
+          store.ensureDir(path.dirname(dst));
+          fs.writeFileSync(dst, p.backup);
+        }
+      }
       for (const mv of moves) {
         const r = await svn.raw(['move', '--parents', fromPosix(scope.svnPath, mv.from), fromPosix(scope.svnPath, mv.to)]);
         if (r.code !== 0) {
@@ -875,6 +919,7 @@ class Service {
       this._saveTask(scope, task);
       return {
         ok: errors.length === 0, task: task.id, changelist: task.changelist, files: summary, skipped: [...skipped], errors,
+        overwritten: overwritten.map((p) => p.path), backupDir,
         commit: await this.commitHelp(scope, task),
       };
     });
@@ -946,20 +991,18 @@ class Service {
     const files = task.landed.files;
     const sharedMap = task.landed.shared || {};
     const own = files.filter((f) => !sharedMap[f]); // shared files change when the owner commits
+    // Committed = some file of the task is no longer a local change AND the task's change is in the SVN BASE.
+    // A revision number alone is not proof: svn update (others' commits) moves it, and a file that disappeared
+    // (deleted by hand, add reverted) has no revision at all.
+    const stList = await svn.status(scope.svnPath);
+    const pending = new Set(stList.filter((e) => ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'].includes(e.item))
+      .map((e) => relPosix(scope.svnPath, e.path)));
     let committed = false;
-    if (task.landed.revs) {
-      committed = own.length > 0 && this._revsAdvanced(task.landed.revs, await this._lastChangedRevs(scope, own), own);
-    } else {
-      const existing = files.map((f) => fromPosix(scope.svnPath, f)).filter((f) => fs.existsSync(f));
-      const infos = existing.length ? await svn.infoMany(existing) : [];
-      committed = infos.some((i) => i.lastChangedRev && i.lastChangedRev > (task.landed.revision || 0));
+    for (const f of own) {
+      if (pending.has(f)) continue;
+      if (await this._changeInBase(scope, task, f)) { committed = true; break; }
     }
-    if (!committed) {
-      const stList = await svn.status(scope.svnPath);
-      const pending = new Set(stList.filter((e) => ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'].includes(e.item))
-        .map((e) => relPosix(scope.svnPath, e.path)));
-      if (files.some((f) => pending.has(f))) return task.status; // still waiting for the human commit
-    }
+    if (!committed && files.some((f) => pending.has(f))) return task.status; // still waiting for the human commit
     task.status = committed ? 'committed' : 'active';
     if (committed) task.committedAt = now();
     else task.landed = null;
@@ -1055,15 +1098,77 @@ class Service {
       }));
   }
 
-  /** Take every other task out of the SVN working copy (last landed first). Their branches are untouched. */
+  /**
+   * What really is in the SVN working copy besides this task (svn status, not the task records):
+   * - every other svnwt-* changelist: a landed task, a committed task's leftovers (also from 0.3.x, which did not
+   *   record them), or a stale one (task removed / not landed any more)
+   * - this task's files parked in TortoiseSVN's "ignore-on-commit" by an earlier "커밋 준비" (none running now)
+   */
+  async wcOccupantsLive(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const svn = await this.svn();
+    const st = await svn.status(scope.svnPath);
+    const tasks = this._listTaskFiles(scope);
+    const byCl = new Map(tasks.filter((o) => o.changelist).map((o) => [o.changelist, o]));
+    const groups = new Map();
+    for (const e of st) {
+      if (!e.changelist || e.changelist === task.changelist || !e.changelist.startsWith('svnwt-')) continue;
+      if (!groups.has(e.changelist)) groups.set(e.changelist, []);
+      groups.get(e.changelist).push(relPosix(scope.svnPath, e.path));
+    }
+    const out = [];
+    const seen = new Set();
+    for (const [cl, paths] of groups) {
+      const o = byCl.get(cl);
+      const status = !o ? 'stale' : o.status === 'landed' ? 'landed' : (o.status === 'committed' && o.landed ? 'committed' : 'stale');
+      if (o) seen.add(o.id);
+      out.push({ id: o ? o.id : null, no: o ? o.no : null, title: o ? o.title : cl, changelist: cl, status, files: paths.length, paths, landedAt: (o && o.landed && o.landed.at) || '' });
+    }
+    for (const o of tasks) {
+      if (o.id === task.id || seen.has(o.id) || o.status !== 'landed') continue; // landed, but nothing left in the working copy
+      out.push({ id: o.id, no: o.no, title: o.title, changelist: o.changelist, status: 'landed', files: 0, paths: [], landedAt: (o.landed && o.landed.at) || '' });
+    }
+    if (!this._commitMarker(scope)) {
+      const mine = await this._taskPaths(scope, task);
+      const parked = st.filter((e) => e.changelist === 'ignore-on-commit').map((e) => relPosix(scope.svnPath, e.path)).filter((x) => mine.has(x));
+      if (parked.length) out.push({ id: null, no: null, title: 'ignore-on-commit', changelist: 'ignore-on-commit', status: 'parked', files: parked.length, paths: parked, landedAt: '' });
+    }
+    const rank = { landed: 0, committed: 1, stale: 2, parked: 3 };
+    return out.sort((a, b) => rank[a.status] - rank[b.status] || String(b.landedAt).localeCompare(String(a.landedAt)));
+  }
+
+  /** Paths this task changes (base..tip, rename sources included) and the files of its current changelist. */
+  async _taskPaths(scope, task) {
+    const git = await this.git(scope);
+    const { tip, base } = await this._range(scope, task);
+    const set = new Set((task.landed && task.landed.files) || []);
+    for (const c of await git.nameStatus(base, tip)) { set.add(c.path); if (c.from) set.add(c.from); }
+    return set;
+  }
+
+  /**
+   * Make the SVN working copy free for this task: other tasks' changelists are taken out (their branches are
+   * untouched), committed tasks' leftovers discarded, stale changelists released (content kept) and this task's
+   * files taken out of "ignore-on-commit".
+   */
   async clearWorkingCopy(ref) {
     const { scope, task } = this.resolveTask(ref);
     this._assertNoCommitInProgress(scope);
-    const occ = this.wcOccupants(task.id).sort((a, b) => String(b.landedAt).localeCompare(String(a.landedAt)));
+    const svn = await this.svn();
     const cleared = [];
-    for (const o of occ) {
-      const r = o.status === 'landed' ? await this.unlandTask(o.id) : await this.discardLeftovers(o.id);
-      cleared.push({ id: o.id, no: o.no, title: o.title, status: o.status, conflicts: r.files.filter((f) => f.action === 'conflict').map((f) => f.path) });
+    for (const o of await this.wcOccupantsLive(task.id)) {
+      let conflicts = [];
+      if (o.status === 'landed') {
+        const r = await this.unlandTask(o.id);
+        conflicts = r.files.filter((f) => f.action === 'conflict').map((f) => f.path);
+      } else if (o.status === 'committed') {
+        const r = await this.discardLeftovers(o.id);
+        conflicts = r.files.filter((f) => f.action === 'conflict').map((f) => f.path);
+      }
+      // stale / parked, and whatever is still in that changelist after the steps above: release the files
+      const still = (await svn.status(scope.svnPath)).filter((e) => e.changelist === o.changelist && (o.status !== 'parked' || o.paths.includes(relPosix(scope.svnPath, e.path)))).map((e) => e.path);
+      if (still.length) await svn.withTargets(['changelist', '--remove'], still, { okCodes: [1] });
+      cleared.push({ id: o.id, no: o.no, title: o.title, changelist: o.changelist, status: o.status, conflicts, released: still.length });
     }
     return { task: task.id, cleared };
   }
@@ -1075,15 +1180,18 @@ class Service {
    */
   async requestChangelist(ref, opts = {}) {
     const { scope, task } = this.resolveTask(ref);
-    const occ = this.wcOccupants(task.id);
-    if (opts.dryRun || !occ.length) return this.landTask(task.id, opts);
+    const occ = await this.wcOccupantsLive(task.id);
+    if (!occ.length) return this.landTask(task.id, opts);
+    const list = occ.map((o) => (o.no ? `#${o.no} "${o.title}"` : o.changelist)).join(', ');
+    const occupiedBy = occ.map((o) => ({ id: o.id, no: o.no, title: o.title, changelist: o.changelist }));
+    if (opts.dryRun) {
+      return { ok: false, dryRun: true, task: task.id, ready: true, occupiedBy,
+        message: `SVN 에 다른 작업(${list})이 있어 changelist 를 만들 수 없습니다. 그대로 호출하면 "리뷰 대기" 로 표시됩니다.` };
+    }
     task.readyAt = now();
     this._saveTask(scope, task);
-    const list = occ.map((o) => `#${o.no} "${o.title}"`).join(', ');
-    return {
-      ok: false, task: task.id, ready: true, occupiedBy: occ.map((o) => ({ id: o.id, no: o.no, title: o.title })),
-      message: `SVN 에 다른 작업(${list})이 반영돼 있어 changelist 를 만들지 않고 "리뷰 대기" 로 표시했습니다. 바꾸는 것은 사용자가 리뷰 화면에서 합니다.`,
-    };
+    return { ok: false, task: task.id, ready: true, occupiedBy,
+      message: `SVN 에 다른 작업(${list})이 있어 changelist 를 만들지 않고 "리뷰 대기" 로 표시했습니다. 바꾸는 것은 사용자가 리뷰 화면에서 합니다.` };
   }
 
   // ------------------------------------------------------------ leftovers after a partial commit
@@ -1303,7 +1411,26 @@ class Service {
     const { scope, task } = this.resolveTask(ref);
     const m = this._commitMarker(scope);
     if (!m || m.task !== task.id || !task.landed) return false;
-    return this._revsAdvanced(m.revs, await this._lastChangedRevs(scope, task.landed.files));
+    const after = await this._lastChangedRevs(scope, task.landed.files);
+    const moved = task.landed.files.filter((f) => (f in after ? after[f] > ((m.revs || {})[f] || 0) : f in (m.revs || {})));
+    for (const f of moved) if (await this._changeInBase(scope, task, f)) return true;
+    return false;
+  }
+
+  /** Is the task's (landed) change to `rel` contained in the SVN BASE of the working copy? */
+  async _changeInBase(scope, task, rel) {
+    const git = await this.git(scope);
+    const svn = await this.svn();
+    const abs = fromPosix(scope.svnPath, rel);
+    const landedBlob = await git.blob(task.landed.commit, rel);
+    const baseBlob = await git.blob(task.landed.base, rel);
+    const pristine = await svn.catBase(abs);
+    if (landedBlob === null) return baseBlob !== null && pristine === null && !fs.existsSync(abs); // deletion committed
+    if (pristine === null) return false; // not in SVN: deleted by hand, add reverted, ...
+    if (bufEq(pristine, landedBlob)) return true;
+    if (baseBlob === null || bufEq(baseBlob, landedBlob)) return false;
+    const m = await this._merge3(scope, pristine, baseBlob, landedBlob);
+    return m.action === 'none' || (m.action === 'write' && bufEq(m.content, pristine));
   }
 
   /** Run `svn commit` for the task between beginCommit and endCommit (from the human UI only, never from the agent). */

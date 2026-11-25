@@ -204,7 +204,7 @@ class ReviewPanel {
       }
       const occ = info.occupants || [];
       if (files.length && occ.length) {
-        notes.push(['info', `SVN 에 ${occ.map((o) => `#${o.no} "${o.title}"`).join(', ')} 이(가) 반영돼 있습니다. 만들면 이 작업으로 바뀝니다.`]);
+        notes.push(['info', `SVN 에 ${occ.map((o) => (o.no ? `#${o.no} "${o.title}"` : o.changelist)).join(', ')} 이(가) 반영돼 있습니다. 만들면 이 작업으로 바뀝니다.`]);
       }
       if (!info.baseIsLatest && !waitFor.length) {
         notes.push(['info', `이 작업을 시작한 뒤 SVN 기준이 ${info.svnBaseCommitsBehind}번 갱신되었습니다. 충돌이 걱정되면 먼저 최신 기준으로 rebase 하세요.`]);

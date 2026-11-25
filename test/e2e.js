@@ -383,6 +383,34 @@ async function main() {
     assert(r.ok, `re-land ${c.id}: ${JSON.stringify(r.blocked)}`);
   }
 
+  // ---------------------------------------------------------------- not committed just because a file disappeared
+  const FC = await s.createTask(scope.id, { title: 'false commit' });
+  fs.writeFileSync(path.join(FC.workPath, 'fc-new.patch'), 'patch\r\n');
+  fs.writeFileSync(path.join(FC.workPath, 'lt2.txt'), 'fc\r\n');
+  await s.commitTask(FC.id, 'FC');
+  assert((await s.landTask(FC.id)).ok);
+  const fcNew = path.join(appDir, 'fc-new.patch');
+  svn('revert', '-q', fcNew);
+  fs.unlinkSync(fcNew);
+  assert.strictEqual((await s.checkCommitted(FC.id)).status, 'landed', 'a deleted new file is not a commit');
+  svn('revert', '-q', lt2Path);
+  assert.strictEqual((await s.checkCommitted(FC.id)).status, 'active', 'everything reverted by hand: back to active, not committed');
+  ok('commit detection: a removed/reverted file is not taken as committed');
+
+  // ---------------------------------------------------------------- human land never refuses over local content
+  const OW = await s.createTask(scope.id, { title: 'overwrite' });
+  { const f = path.join(OW.workPath, 'lt.txt'); fs.writeFileSync(f, R(f).replace('l8\r\n', 'l8 OW\r\n')); }
+  await s.commitTask(OW.id, 'OW');
+  assert(/l8 USER/.test(R(ltPath)), 'user edit on the same line is in the working copy');
+  assert(!(await s.landTask(OW.id, { dryRun: true })).ok, 'without overwrite it is a conflict');
+  const ow = await s.landTask(OW.id, { overwrite: true });
+  assert(ow.ok && ow.overwritten.includes('lt.txt') && ow.backupDir, JSON.stringify(ow));
+  assert(/l8 OW/.test(R(ltPath)) && !/l8 USER/.test(R(ltPath)), R(ltPath));
+  assert(/l8 USER/.test(fs.readFileSync(path.join(ow.backupDir, 'lt.txt'), 'utf8')), 'previous content backed up');
+  assert.strictEqual(clOf('lt.txt'), s.resolveTask(OW.id).task.changelist);
+  ok('changelist from the UI: overlapping local content replaced by the task version (backed up), no refusal');
+  await s.unlandTask(OW.id);
+
   // case-only rename of a versioned file via git mv (Windows: same file on disk)
   const CR = await s.createTask(scope.id, { title: 'case rename' });
   const g = new (require('../src/core/git').Git)(t.git.path, null);

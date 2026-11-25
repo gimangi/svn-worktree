@@ -100,6 +100,51 @@ async function main() {
     assert(/a6 B/.test(a) && /a3 C/.test(a));
     ok('old-landed task commits only its own change with the new code');
 
+    // what 0.3.x leaves behind: a committed task whose left-out file is still in its changelist (0.3.x did not
+    // record leftovers) and a file parked in ignore-on-commit by an old "커밋 준비"
+    const xPath = path.join(wc, 'app', 'x.txt');
+    const wPath = path.join(wc, 'app', 'w.txt');
+    fs.writeFileSync(xPath, 'x1\r\nx2\r\nx3\r\nx4\r\n');
+    fs.writeFileSync(wPath, 'w1\r\n');
+    svn('add', '-q', xPath, wPath);
+    svn('commit', '-q', '-m', 'x w', xPath, wPath);
+    await s.refreshScope(scope.id);
+    const D = await s.createTask(scope.id, { title: 'left over' });
+    const E = await s.createTask(scope.id, { title: 'next' });
+    const ed = (t, f, from, to) => { const p = path.join(t.workPath, f); fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace(from, to)); };
+    ed(D, 'x.txt', 'x2\r\n', 'x2 D\r\n'); fs.writeFileSync(path.join(D.workPath, 'd.txt'), 'd\r\n'); await s.commitTask(D.id, 'D');
+    ed(E, 'x.txt', 'x3\r\n', 'x3 E\r\n'); ed(E, 'w.txt', 'w1\r\n', 'w1 E\r\n'); await s.commitTask(E.id, 'E');
+    assert((await s.landTask(D.id)).ok);
+    svn('commit', '-q', '-m', 'only d', path.join(wc, 'app', 'd.txt'));
+    assert.strictEqual((await s.checkCommitted(D.id)).status, 'committed');
+    const dFile = path.join(scope.home, 'tasks', D.id + '.json');
+    const dj = JSON.parse(fs.readFileSync(dFile, 'utf8'));
+    delete dj.leftovers;
+    fs.writeFileSync(dFile, JSON.stringify(dj, null, 2));
+    svn('changelist', '-q', 'ignore-on-commit', wPath);
+    // an UNMODIFIED file still in a changelist of a task that no longer exists (TortoiseSVN does not show it)
+    const vPath = path.join(wc, 'app', 'v.txt');
+    fs.writeFileSync(vPath, 'v1\r\n');
+    svn('add', '-q', vPath);
+    svn('commit', '-q', '-m', 'v', vPath);
+    svn('changelist', '-q', 'svnwt-99-gone', vPath);
+    const dry = await s.landTask(E.id, { dryRun: true });
+    assert(!dry.ok && dry.blocked.length === 2, JSON.stringify(dry.blocked));
+    const rq = await s.requestChangelist(E.id, { dryRun: true });
+    assert(rq.ready && !rq.blocked, JSON.stringify(rq));
+    const live = await s.wcOccupantsLive(E.id);
+    assert(live.some((o) => o.id === D.id && o.status === 'committed') && live.some((o) => o.status === 'parked') && live.some((o) => o.changelist === 'svnwt-99-gone' && o.status === 'stale'), JSON.stringify(live));
+    ok('0.3.x leftovers (committed task, ignore-on-commit) are found from the working copy; agent dry run is not a conflict');
+
+    await s.clearWorkingCopy(E.id);
+    const le = await s.landTask(E.id);
+    assert(le.ok, JSON.stringify(le.blocked));
+    const cls = [...new Set([...svn('status', '--xml', wc).matchAll(/<changelist\s+name="([^"]+)"/g)].map((m) => m[1]))];
+    assert.deepStrictEqual(cls, [E.changelist], cls.join(', '));
+    const x = fs.readFileSync(xPath, 'utf8');
+    assert(/x3 E/.test(x) && !/x2 D/.test(x), x);
+    ok('switch clears all of it; the next task lands as the only changelist');
+
     s.setAgentState(B.id, 'idle');
     s.appendSession(B.id, { role: 'user', text: 'hello' });
     assert.strictEqual(s.getSession(B.id).entries.length, 1);

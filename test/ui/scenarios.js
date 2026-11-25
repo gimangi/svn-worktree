@@ -243,25 +243,17 @@ async function scenarios(d, ctx) {
     assert(/바꿀까요/.test(note) && /report mul output/.test(note) && /git/.test(note), note);
     return { note };
   });
-  await step({ scenario: S6, action: '"바꾸기" 클릭 (사용자가 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '기존 changelist 는 버려지고, 직접 고친 파일과 겹친다는 확인 창' }, async () => {
+  await step({ scenario: S6, action: '"바꾸기" 클릭 (사용자가 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '기존 changelist 는 버려지고, 거부 없이 "만들기" 확인 창 (겹치는 파일은 작업 내용으로 바꾸고 백업)' }, async () => {
     await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '바꾸기');
-    await d.waitFor(`[...document.querySelectorAll('.monaco-dialog-box .dialog-message-text, .monaco-dialog-box .dialog-message-detail')].some((e) => /직접 고친/.test(e.textContent))`, 30000, 'blocked dialog');
+    await d.waitFor(`[...document.querySelectorAll('.monaco-dialog-box .dialog-message-text, .monaco-dialog-box .dialog-message-detail')].some((e) => /백업/.test(e.textContent))`, 30000, 'confirm dialog');
     const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
+    assert(/만들까요/.test(note) && /build\.cmd/.test(note), note);
     const cls = (svnSt().match(/--- Changelist '([^']+)'/g) || []).length;
     assert(cls === 0, 'other changelists dropped: ' + svnSt());
     return { note };
   });
-  await d.key('Escape');
-  await sleep(500);
-  await step({ scenario: S6, action: '사용자가 SVN 원본의 로컬 수정을 되돌림 (svn revert) → 다시 "SVN changelist 만들기"', expect: '반영할 파일 목록이 있는 확인 창' }, async () => {
-    require('child_process').execFileSync(svnExe, ['revert', path.join(ctx.wc, 'trunk', 'tools', 'build.cmd')]);
-    await sleep(800);
-    const note = await land();
-    assert(/반영/.test(note), note);
-    return { note };
-  });
-  await step({ scenario: S6, action: '"반영" 클릭', expect: '트리: 이 작업만 "커밋 대기 · 1파일", 버린 작업은 "진행 중"' }, async () => {
-    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '반영');
+  await step({ scenario: S6, action: '"만들기" 클릭', expect: '트리: 이 작업만 "커밋 대기 · 1파일", 버린 작업은 "진행 중", 백업 위치 알림' }, async () => {
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '만들기');
     let rows = [];
     for (let i = 0; i < 60; i++) {
       rows = await treeRows();
@@ -271,7 +263,10 @@ async function scenarios(d, ctx) {
     const row = rows.find((r) => r.includes('tools build script')) || '';
     const other = rows.find((r) => r.includes('report mul output')) || '';
     assert(/커밋 대기/.test(row) && /진행 중/.test(other), `${row} / ${other}`);
-    return { note: `${row.replace(/, has actions/, '')} / ${other.replace(/, has actions/, '')}` };
+    let notes = '';
+    for (let i = 0; i < 30 && !/백업/.test(notes); i++) { await sleep(300); notes = (await d.notifications()).join(' | '); }
+    assert(/백업/.test(notes), notes);
+    return { note: `${row.replace(/, has actions/, '')} / ${other.replace(/, has actions/, '')} / 알림: ${notes.slice(0, 200)}` };
   });
 
   // ---------------------------------------------------------------- 7

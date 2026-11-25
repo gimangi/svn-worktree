@@ -338,64 +338,61 @@ function registerCommands(ctx) {
       autoCommit = a === '커밋 후 진행';
     }
     // One changelist at a time: drop what other tasks have in the SVN working copy (their work stays in git).
-    const occ = service.wcOccupants(t.id);
+    const occ = await service.wcOccupantsLive(t.id);
     let switched = false;
     if (occ.length) {
       const a = await vscode.window.showWarningMessage(`changelist 를 #${t.no} "${t.title}" 로 바꿀까요?`, {
         modal: true,
         detail: `SVN working copy 에서 아래 변경을 버립니다.\n\n${
-          occ.map((o) => `· #${o.no} "${o.title}" — ${o.status === 'landed' ? `파일 ${o.files}개` : `커밋 후 남은 파일 ${o.files}개`}`).join('\n')
+          occ.map((o) => ({
+            landed: `· #${o.no} "${o.title}" — 파일 ${o.files}개`,
+            committed: `· #${o.no} "${o.title}" — 커밋 후 남은 파일 ${o.files}개`,
+            stale: `· ${o.changelist} — 파일 ${o.files}개 (changelist 만 해제, 내용 유지)`,
+            parked: `· ignore-on-commit 의 이 작업 파일 ${o.files}개 (changelist 에서 빼기)`,
+          }[o.status])).join('\n')
         }\n\n작업 내용은 git 에 남아 있어 다시 만들 수 있습니다. 직접 고친 내용은 그대로 둡니다.`,
       }, '바꾸기');
       if (a !== '바꾸기') return undefined;
       const c = await withProgress('기존 changelist 버리는 중…', () => service.clearWorkingCopy(t.id));
       refreshAll();
       const kept = c.cleared.filter((x) => x.conflicts.length);
-      if (kept.length) vscode.window.showWarningMessage(`직접 고친 내용과 겹쳐 남겨 둔 파일: ${kept.map((x) => `#${x.no} ${x.conflicts.join(', ')}`).join(' / ')}`);
+      if (kept.length) vscode.window.showWarningMessage(`직접 고친 내용과 겹쳐 남겨 둔 파일: ${kept.map((x) => `${x.no ? `#${x.no}` : x.changelist} ${x.conflicts.join(', ')}`).join(' / ')}`);
       switched = true;
     }
-    const plan = await withProgress('SVN working copy 반영 내용 확인 중…', () => service.landTask(t.id, { dryRun: true, autoCommit }));
+    const plan = await withProgress('SVN working copy 반영 내용 확인 중…', () => service.landTask(t.id, { dryRun: true, autoCommit, overwrite: true }));
     const count = (a) => plan.files.filter((f) => f.action === a).length;
     const summary = [
       ['수정/추가', count('write')], ['삭제', count('delete')], ['이동', count('move-source')], ['이미 같음', count('none')],
     ].filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(' · ');
-    const lines = [
-      ...plan.files.filter((f) => ['write', 'delete', 'move-source'].includes(f.action)).map((f) => `${f.action === 'delete' ? '−' : f.action === 'move-source' ? '→' : '+'} ${f.path}${f.merged ? '  (다른 변경과 자동 병합)' : ''}${f.sharedWith ? `  (${f.sharedWith.replace(/^svnwt-/, '#').replace(/^#(\d+)-.*/, '#$1')} 과 같이 고친 파일 — 커밋할 때 이 작업 변경만 분리)` : ''}`),
-      ...plan.blocked.map((b) => `✗ ${b.path} — ${b.reason}`),
-    ];
+    const lines = plan.files.filter((f) => ['write', 'delete', 'move-source'].includes(f.action))
+      .map((f) => `${f.action === 'delete' ? '−' : f.action === 'move-source' ? '→' : '+'} ${f.path}${f.overwrite ? '  (working copy 내용 대신 작업 내용, 원래 내용은 백업)' : ''}`);
+    const overwrites = plan.files.filter((f) => f.overwrite && f.action !== 'none');
     let force = false;
     if (plan.blocked.length) {
+      // only what SVN itself got since the task started (rebase) or a read-only file can block now
       const applicable = count('write') + count('delete') + count('move-source');
-      const localEdit = plan.blocked.some((b) => !b.waitFor && !b.needsRebase && /로컬 변경|읽기 전용/.test(b.reason || ''));
-      const userCl = plan.blocked.some((b) => /사용자 changelist/.test(b.reason || ''));
-      const waitFor = plan.waitFor || [];
-      const tips = [];
-      if (waitFor.length) {
-        tips.push(`커밋 순서: ${waitFor.map((w) => `#${w.no} "${w.title}"`).join(', ')} → #${t.no}`);
-        tips.push(`${waitFor.map((w) => `#${w.no}`).join(', ')} 를 먼저 SVN 커밋하세요. 커밋되면 알려 드리고, 그때 "rebase 후 changelist 만들기" 로 이어서 진행하면 됩니다 (같은 줄 충돌은 rebase 할 때 worktree 에서 정리).`);
-      }
-      if (plan.needsRebase) tips.push('SVN 에 새로 커밋된 내용과 겹칩니다. "최신 SVN 기준으로 rebase" 후 다시 만드세요.');
-      if (localEdit) tips.push('SVN working copy 에서 같은 파일을 직접 고친 내용과 겹칩니다. 그 수정을 먼저 커밋하거나 되돌린 뒤 다시 시도하세요.');
-      if (userCl) tips.push('직접 만든 changelist 에 들어 있는 파일입니다. 그 changelist 에서 파일을 뺀 뒤 다시 시도하세요.');
       const buttons = [];
-      if (waitFor.length) buttons.push(`#${waitFor[0].no} 리뷰 열기`);
-      if (applicable) buttons.push('충돌 파일 빼고 반영');
-      if (plan.needsRebase || (!waitFor.length && !info.baseIsLatest)) buttons.push('최신 SVN 기준으로 rebase');
+      if (plan.needsRebase) buttons.push('rebase 후 다시 만들기');
+      if (applicable) buttons.push('그 파일 빼고 만들기');
       refreshAll();
-      const a = await vscode.window.showWarningMessage(`#${t.no}: SVN working copy 에 반영할 수 없는 파일이 ${plan.blocked.length}개 있습니다.`,
-        { modal: true, detail: [...lines, '', ...tips].join('\n') }, ...buttons);
-      if (a === '최신 SVN 기준으로 rebase') return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
-      if (waitFor.length && a === `#${waitFor[0].no} 리뷰 열기`) return vscode.commands.executeCommand('svnwt.openReview', waitFor[0].id);
-      if (a !== '충돌 파일 빼고 반영') return undefined;
+      const a = await vscode.window.showWarningMessage(`#${t.no}: 파일 ${plan.blocked.length}개는 지금 만들 수 없습니다.`, {
+        modal: true,
+        detail: [...plan.blocked.map((b) => `✗ ${b.path} — ${b.reason}`), '', plan.needsRebase ? 'SVN 에 새로 커밋된 내용과 같은 줄입니다. rebase 하면 worktree 에서 정리한 뒤 이어서 만듭니다.' : ''].join('\n').trim(),
+      }, ...buttons);
+      if (a === 'rebase 후 다시 만들기') return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
+      if (a !== '그 파일 빼고 만들기') return undefined;
       force = true;
-    } else if (!switched) {
-      const a = await vscode.window.showInformationMessage(`#${t.no} 변경을 SVN working copy 에 반영하고 changelist "${t.changelist}" 로 묶을까요?`,
-        { modal: true, detail: `${summary}\n\n${lines.join('\n')}` }, '반영');
-      if (a !== '반영') return undefined;
+    } else if (!switched || overwrites.length) {
+      const a = await vscode.window.showInformationMessage(`#${t.no} changelist 를 만들까요?`, {
+        modal: true,
+        detail: `${summary}\n\n${lines.join('\n')}${overwrites.length ? `\n\n${overwrites.length}개 파일은 working copy 에 있던 다른 내용을 작업 내용으로 바꿉니다. 원래 내용은 백업합니다.` : ''}`,
+      }, '만들기');
+      if (a !== '만들기') return undefined;
     }
-    const r = await withProgress('SVN changelist 만드는 중…', () => service.landTask(t.id, { autoCommit, force }));
+    const r = await withProgress('SVN changelist 만드는 중…', () => service.landTask(t.id, { autoCommit, force, overwrite: true }));
     refreshAll();
     if (r.errors && r.errors.length) vscode.window.showWarningMessage(`일부 svn 명령 실패: ${r.errors.join(' / ')}`);
+    if (r.backupDir) vscode.window.showInformationMessage(`바꾸기 전 내용 백업: ${r.backupDir}`, '폴더 열기').then((x) => { if (x) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(r.backupDir)); });
     const a = await vscode.window.showInformationMessage(`changelist "${r.changelist}" 준비 완료 (파일 ${r.commit.files.length}개). SVN 커밋은 직접 진행하세요.`, 'SVN 커밋…', '명령 복사');
     if (a === 'SVN 커밋…') vscode.commands.executeCommand('svnwt.commitSvn', t.id);
     if (a === '명령 복사') vscode.commands.executeCommand('svnwt.copyCommitCommand', t.id);
