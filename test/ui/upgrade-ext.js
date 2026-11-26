@@ -1,4 +1,5 @@
 'use strict';
+require('../hide-windows');
 /**
  * Extension upgrade test in an isolated VS Code profile (no CDP, no proposed-API flag):
  *   1) install OLD vsix, open a working copy, wait for activation
@@ -53,7 +54,10 @@ function logs() {
 async function runOnce(folder, untilRe, timeoutMs = 90000) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const p = spawn(CODE, [`--user-data-dir=${ud}`, `--extensions-dir=${ext}`, '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--new-window', folder], { env, stdio: 'ignore' });
+  const args = [`--user-data-dir=${ud}`, `--extensions-dir=${ext}`, '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--new-window', folder];
+  // on a separate desktop (no window on the user's screen) unless SVNWT_UI_VISIBLE=1
+  const p = process.env.SVNWT_UI_VISIBLE ? spawn(CODE, args, { env, stdio: 'ignore' })
+    : await require('./hidden-desktop').startHidden(CODE, args, env).then((h) => ({ kill: () => { spawnSync('taskkill', ['/PID', String(h.pid), '/T', '/F'], { stdio: 'ignore' }); h.holder.kill(); } }));
   const t0 = Date.now();
   while (Date.now() - t0 < timeoutMs) {
     await sleep(1500);

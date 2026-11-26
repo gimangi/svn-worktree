@@ -1,4 +1,5 @@
 'use strict';
+require('../hide-windows');
 /** Build docs/ui-test/report.html from steps.json (+ the findings below). */
 const fs = require('fs');
 const path = require('path');

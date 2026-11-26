@@ -103,6 +103,8 @@ class ReviewPanel {
         case 'terminal': return vscode.commands.executeCommand('svnwt.openTerminal', this.taskId);
         case 'remove': return vscode.commands.executeCommand('svnwt.removeTask', this.taskId);
         case 'discardLeftovers': return vscode.commands.executeCommand('svnwt.discardLeftovers', this.taskId);
+        case 'discardScope': return vscode.commands.executeCommand('svnwt.discardScopeChanges', this.taskId);
+        case 'purge': return vscode.commands.executeCommand('svnwt.purgeTask', this.taskId);
         case 'rebaseLand': return vscode.commands.executeCommand('svnwt.rebaseAndLand', this.taskId);
         case 'openTask': return vscode.commands.executeCommand('svnwt.openReview', m.task);
         case 'refresh': return this.update();
@@ -235,11 +237,11 @@ class ReviewPanel {
     } else if (t.status === 'committed') {
       const left = info.leftovers || [];
       title = 'SVN 커밋 완료';
-      text = '이 작업은 SVN 에 커밋되었습니다. worktree 를 정리해도 됩니다.';
-      buttons = [['remove', 'worktree 정리', 'primary'], ['openChanges', '변경 사항 보기']];
+      text = '이 작업은 SVN 에 커밋되었습니다. 보관하면 worktree 를 지우고 커밋 기록·리뷰·대화는 "보관된 작업"에 남깁니다.';
+      buttons = [['remove', '보관 (worktree 정리)', 'primary'], ['discardScope', 'SVN 남은 변경 정리…'], ['openChanges', '변경 사항 보기']];
       if (left.length) {
         notes.push(['warn', `커밋에서 빠진 파일 ${left.length}개가 남아 있습니다: ${left.join(', ')}`]);
-        buttons = [['discardLeftovers', '남은 변경 버리기', 'primary'], ['remove', 'worktree 정리'], ['openChanges', '변경 사항 보기']];
+        buttons = [['discardLeftovers', '남은 변경 버리기', 'primary'], ['remove', '보관 (worktree 정리)'], ['discardScope', 'SVN 남은 변경 정리…'], ['openChanges', '변경 사항 보기']];
       }
     }
     if (['landed', 'committed'].includes(t.status) && !(info.commitInProgress && info.commitInProgress.mine)) buttons.push(['checkSvn', 'SVN 상태 확인']);
@@ -272,9 +274,31 @@ class ReviewPanel {
     </section>`;
   }
 
+  /** Read-only history of an archived task. */
+  renderArchived(info, { files, add, del, fileRows, commitRows, reviewHtml, runs, message }) {
+    const t = info.task;
+    const d = (s) => (s ? esc(new Date(s).toLocaleString()) : '-');
+    const a = t.archive || null;
+    const svn = a && a.statusBefore === 'committed' ? `SVN 커밋 ${d(t.committedAt)}` : 'SVN 커밋 안 함';
+    return `
+      ${this.isPreview ? '<div class="pv muted">미리보기 탭 — 다른 작업을 열면 이 탭에 표시됩니다 · <a href="#" data-cmd="keep">탭 유지</a></div>' : ''}
+      <header>
+        <h1>#${t.no} ${esc(t.title)} <span class="badge muted" title="${esc(STATUS_TEXT.archived)}">보관됨</span></h1>
+        <div class="meta">생성 ${d(t.createdAt)} · ${svn} · 보관 ${d(t.archivedAt)}</div>
+        <div class="meta">${info.history ? `커밋 ${info.commits.length}개 · 파일 ${files.length}개 <span class="plus">+${add}</span> <span class="minus">-${del}</span>` : '<span class="muted">0.4.7 이하 버전에서 정리되어 git 커밋 기록이 없습니다. 리뷰와 에이전트 대화만 남아 있습니다.</span>'}</div>
+        <div class="meta muted">worktree 는 삭제되었습니다 · <a href="#" data-cmd="purge" class="danger">기록 삭제</a></div>
+      </header>
+      ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
+      ${info.history ? `<section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>
+      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면</div><table class="files">${fileRows}</table>` : '<p class="muted">없음</p>'}</section>` : ''}
+      ${(this.session || []).length ? this.renderAgent(t) : ''}
+      <section><h2>리뷰</h2>${reviewHtml}</section>
+      ${runs.length ? `<section><h2>테스트 화면 <span class="muted">(${runs.length}회)</span></h2>${this.renderRuns(runs, info.tip)}</section>` : ''}
+      ${message && message.trim() ? `<section><h2>SVN 커밋 메시지</h2><pre class="cmd">${esc(message)}</pre></section>` : ''}`;
+  }
+
   render(info, reviews, message, runs = []) {
     const t = info.task;
-    if (t.status === 'archived') return this.shell(`<h1>#${t.no} ${esc(t.title)}</h1><p class="muted">삭제된 작업입니다.</p>`);
     const files = info.files || [];
     const add = files.reduce((a, f) => a + (f.add || 0), 0);
     const del = files.reduce((a, f) => a + (f.del || 0), 0);
@@ -282,14 +306,14 @@ class ReviewPanel {
     const lastRun = runs[runs.length - 1];
 
     const fileRows = files.map((f) => `
-      <tr class="file" data-file='${esc(JSON.stringify(f))}'>
+      <tr class="file nav" tabindex="0" data-file='${esc(JSON.stringify(f))}'>
         <td><span class="st st-${esc(f.status)}">${esc(f.status)}</span></td>
         <td class="path">${f.from ? `<span class="muted">${esc(f.from)} → </span>` : ''}${esc(f.path)}${t.landed && t.landed.shared && t.landed.shared[f.path] ? ` <span class="badge info" title="${esc(t.landed.shared[f.path])} 과 같이 고친 파일">공유</span>` : ''}</td>
         <td class="num"><span class="plus">+${f.add || 0}</span> <span class="minus">-${f.del || 0}</span>${f.binary ? ' <span class="muted">binary</span>' : ''}</td>
       </tr>`).join('');
 
     const commitRows = (info.commits || []).map((c) => `
-      <li class="commit" data-sha="${esc(c.sha)}" title="이 커밋의 변경 보기"><code>${esc(c.sha.slice(0, 8))}</code> ${esc(c.subject)} <span class="muted">— ${esc(c.author)}, ${esc(new Date(c.date).toLocaleString())}</span></li>`).join('');
+      <li class="commit nav" tabindex="0" data-sha="${esc(c.sha)}" title="이 커밋의 변경 보기"><code>${esc(c.sha.slice(0, 8))}</code> ${esc(c.subject)} <span class="muted">— ${esc(c.author)}, ${esc(new Date(c.date).toLocaleString())}</span></li>`).join('');
 
     const reviewHtml = reviews.slice().reverse().map((r) => {
       const [label, cls] = VERDICT[r.verdict] || [r.verdict, 'info'];
@@ -301,6 +325,8 @@ class ReviewPanel {
       return `<div class="review"><div class="rh"><span class="badge ${cls}">${esc(label)}</span> <b>${esc(r.reviewer)}</b> <span class="muted">${esc(new Date(r.at).toLocaleString())}</span> ${stale}</div>
         <div class="body">${esc(r.summary)}</div>${cm ? `<ul class="comments">${cm}</ul>` : ''}</div>`;
     }).join('') || '<p class="muted">아직 리뷰가 없습니다. "Copilot 리뷰 요청"으로 에이전트 리뷰를 받을 수 있습니다.</p>';
+
+    if (t.status === 'archived') return this.shell(this.renderArchived(info, { files, add, del, fileRows, commitRows, reviewHtml, runs, message }));
 
     const body = `
       ${this.isPreview ? '<div class="pv muted">미리보기 탭 — 다른 작업을 열면 이 탭에 표시됩니다 · <a href="#" data-cmd="keep">탭 유지</a></div>' : ''}
@@ -314,7 +340,7 @@ class ReviewPanel {
       ${this.renderNext(info, files)}
       ${this.renderAgent(t)}
       ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
-      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
+      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면</div><table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
       <section><h2>테스트 화면${runs.length ? ` <span class="muted">(${runs.length}회)</span>` : ''}</h2>${this.renderRuns(runs, info.tip)}</section>
       <section><h2>리뷰</h2>${reviewHtml}</section>
       <section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>
@@ -369,6 +395,8 @@ class ReviewPanel {
   table.files td { padding: 4px 6px; border-bottom: 1px solid var(--vscode-panel-border); }
   tr.file { cursor: pointer; }
   tr.file:hover { background: var(--vscode-list-hoverBackground); }
+  .nav:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+  .keys { font-size: 0.88em; margin: 2px 0 6px; }
   td.path { font-family: var(--vscode-editor-font-family); }
   td.num { text-align: right; white-space: nowrap; }
   .plus { color: var(--vscode-gitDecoration-addedResourceForeground, #2ea043); }
@@ -427,6 +455,30 @@ class ReviewPanel {
   const st = vscode.getState() || {};
   if (st.task === task && st.scroll) window.scrollTo(0, st.scroll);
   window.addEventListener('scroll', () => vscode.setState(Object.assign({}, vscode.getState() || {}, { task, scroll: window.scrollY })));
+  // keyboard: up/down (j/k) over the file and commit rows, Enter opens. The row is remembered, so coming back
+  // from a diff (Esc) continues where you were
+  const navs = [...document.querySelectorAll('.nav')];
+  const save = (o) => vscode.setState(Object.assign({}, vscode.getState() || {}, { task }, o));
+  const focusNav = (i) => { const el = navs[Math.max(0, Math.min(navs.length - 1, i))]; if (el) el.focus(); };
+  navs.forEach((el, i) => {
+    el.addEventListener('focus', () => save({ nav: i, navOn: true }));
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
+  });
+  document.addEventListener('focusin', (e) => { if (!e.target.classList || !e.target.classList.contains('nav')) save({ navOn: false }); });
+  document.addEventListener('keydown', (e) => {
+    const t = e.target;
+    if ((t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) || e.ctrlKey || e.altKey || e.metaKey || !navs.length) return;
+    const down = e.key === 'ArrowDown' || e.key === 'j';
+    const up = e.key === 'ArrowUp' || e.key === 'k';
+    if (!down && !up) return;
+    e.preventDefault();
+    const cur = navs.indexOf(document.activeElement);
+    const s = vscode.getState() || {};
+    focusNav(cur < 0 ? (s.task === task && typeof s.nav === 'number' ? s.nav : 0) : cur + (down ? 1 : -1));
+  });
+  const restoreNav = () => { const s = vscode.getState() || {}; if (s.task === task && s.navOn && typeof s.nav === 'number' && !navs.includes(document.activeElement)) focusNav(s.nav); };
+  window.addEventListener('focus', restoreNav);
+  if (document.hasFocus()) restoreNav();
 </script></body></html>`;
   }
 }

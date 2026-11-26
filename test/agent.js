@@ -1,4 +1,5 @@
 'use strict';
+require('./hide-windows');
 /**
  * Agent loop test with a scripted fake model and a minimal fake `vscode` (no VS Code needed).
  *   Code.exe(node) test/agent.js

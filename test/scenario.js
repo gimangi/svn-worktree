@@ -1,4 +1,5 @@
 'use strict';
+require('./hide-windows');
 /**
  * Live multi-task scenario on the demo environment (scripts\make-demo.cmd).
  * Three "agents" each talk to their OWN MCP server process (like separate Copilot sessions),

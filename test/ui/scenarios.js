@@ -113,6 +113,104 @@ async function scenarios(d, ctx) {
     assert(pv, 'preview banner');
     return { note: `리뷰 탭: ${tabs.map((t) => t.split(',')[0]).join(' | ')}` };
   });
+  // ---- diff: on top of the review (side by side), keyboard, separate window
+  const groupsNow = () => d.eval(`[...document.querySelectorAll('.editor-group-container')].map((g) => { const a = g.querySelector('.tab.active'); return { tabs: [...g.querySelectorAll('.tab')].map((t) => (t.getAttribute('aria-label') || '').split(',')[0]), active: a ? (a.getAttribute('aria-label') || '').split(',')[0] : '', sbs: !!g.querySelector('.monaco-diff-editor.side-by-side') }; })`);
+  const activeDiff = async (re, ms = 8000) => {
+    const t0 = Date.now();
+    let g = [];
+    for (;;) {
+      g = await groupsNow();
+      const hit = g.find((x) => /↔/.test(x.active) && re.test(x.active));
+      if (hit) return hit;
+      if (Date.now() - t0 > ms) throw new Error(`no active diff ${re}: ${JSON.stringify(g.map((x) => x.active))}`);
+      await sleep(250);
+    }
+  };
+  const cursorLine = async () => Number((/Ln (\d+)/.exec(await d.eval(`[...document.querySelectorAll('.statusbar-item')].map((e) => e.textContent).join(' | ')`)) || [])[1] || 0);
+  const titleButtons = () => d.eval(`[...document.querySelectorAll('.editor-group-container .editor-actions .action-label')].map((a) => a.getAttribute('aria-label') || '').filter((x) => /변경 파일|리뷰 화면|새 창/.test(x))`);
+  const clickTitleButton = async (re) => {
+    const r = await d.eval(`(() => { const a = [...document.querySelectorAll('.editor-group-container .editor-actions .action-label')].find((x) => ${re}.test(x.getAttribute('aria-label') || '')); if (!a) return null; const b = a.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`);
+    assert(r, 'title button ' + re);
+    await d.mouse('mousePressed', r.x, r.y); await d.mouse('mouseReleased', r.x, r.y);
+  };
+  await step({ scenario: S2, action: '리뷰 화면에서 변경 파일 클릭', expect: '리뷰 화면과 같은 탭 그룹에 전체 폭 diff (좌우 비교), 제목줄에 이전/다음 파일 · 리뷰 화면 · 새 창으로 분리' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('tr.file').click(); return true; }`, 8000, P.sub);
+    const g = await activeDiff(/main\.cpp .*1\/3/);
+    assert(g.tabs.some((t) => /add sub function/.test(t)), 'diff not in the review group: ' + JSON.stringify(g.tabs));
+    // the editor column is narrow here (two groups): VS Code shows one column until the one-time offer is accepted
+    await d.waitFor(`[...document.querySelectorAll('.notifications-toasts .monaco-button')].some((b) => b.textContent.trim() === '항상 좌우로')`, 10000, 'side-by-side offer');
+    await d.click('.notifications-toasts .monaco-button', '항상 좌우로');
+    for (let i = 0; i < 30 && !(await groupsNow()).some((x) => x.sbs); i++) await sleep(250);
+    assert((await groupsNow()).some((x) => x.sbs), 'diff is not side by side');
+    const btns = await titleButtons();
+    assert(btns.length >= 4, JSON.stringify(btns));
+    return { note: `탭 그룹: ${g.tabs.join(' | ')} · 버튼: ${btns.join(', ')}` };
+  });
+  await step({ scenario: S2, action: 'F7 → F7 → Shift+F7', expect: '첫 변경으로, 파일 끝에서는 다음 파일의 첫 변경으로, 거꾸로는 이전 파일의 마지막 변경으로' }, async () => {
+    await d.key('F7');
+    await sleep(500);
+    const l1 = await cursorLine();
+    assert(l1 > 1, 'cursor did not move to the change: Ln ' + l1);
+    await d.key('F7');
+    const g2 = await activeDiff(/2\/3/);
+    await sleep(500);
+    const l2 = await cursorLine();
+    await d.key('F7', { shift: true });
+    const g3 = await activeDiff(/main\.cpp .*1\/3/);
+    await sleep(500);
+    const l3 = await cursorLine();
+    assert(l3 === l1, `back on the change of main.cpp: Ln ${l3} (was ${l1})`);
+    assert(g3.tabs.filter((t) => /↔/.test(t)).length === 1, 'one diff tab: ' + g3.tabs.join(' | '));
+    return { note: `main.cpp Ln ${l1} → ${g2.active} Ln ${l2} → ${g3.active} Ln ${l3}` };
+  });
+  await step({ scenario: S2, action: 'Alt+→ (다음 파일) → Esc', expect: '같은 탭에서 다음 파일 diff, Esc 로 리뷰 화면' }, async () => {
+    await d.key('ArrowRight', { alt: true });
+    const g = await activeDiff(/2\/3/);
+    await d.key('Escape');
+    let now = [];
+    for (let i = 0; i < 20; i++) { await sleep(250); now = await groupsNow(); if (now.some((x) => /add sub function/.test(x.active))) break; }
+    assert(now.some((x) => /add sub function/.test(x.active) && !/↔/.test(x.active)), 'review not active: ' + JSON.stringify(now.map((x) => x.active)));
+    return { note: `${g.active} → Esc → ${now.find((x) => /add sub function/.test(x.active)).active}` };
+  });
+  await step({ scenario: S2, action: '리뷰 화면에서 ↓ ↓ Enter', expect: '파일 행을 키보드로 골라 diff 열기 (두 번째 파일)' }, async () => {
+    const focused = await d.webview(`(doc) => { const k = (key) => (doc.activeElement && doc.activeElement !== doc.body ? doc.activeElement : doc).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); k('ArrowDown'); k('ArrowDown'); const a = doc.activeElement; const label = a && a.classList.contains('nav') ? a.querySelector('.path').textContent.trim() : ''; k('Enter'); return label; }`, 8000, P.sub);
+    assert(/mathutil\.cpp/.test(focused), 'focused row: ' + focused);
+    const g = await activeDiff(/mathutil\.cpp .*2\/3/);
+    return { note: `선택한 행: ${focused} → ${g.active}` };
+  });
+  const settingsFile = path.join(path.dirname(ctx.demo), 'ud', 'User', 'settings.json');
+  const readSettings = () => { try { return JSON.parse(require('fs').readFileSync(settingsFile, 'utf8')); } catch (_) { return {}; } };
+  const pages = async () => (await (await fetch('http://127.0.0.1:9333/json/list')).json()).filter((t) => t.type === 'page').map((t) => t.title || t.url);
+  await step({ scenario: S2, action: 'diff 제목줄 "새 창으로 분리" → 리뷰 화면에서 다른 파일 클릭', expect: 'diff 가 별도 창으로 옮겨지고 다음 diff 도 그 창에 열림. 방식이 설정에 저장됨' }, async () => {
+    await clickTitleButton('/새 창으로 분리/');
+    let p = [];
+    for (let i = 0; i < 30; i++) { await sleep(300); p = await pages(); if (p.length >= 2 && !(await groupsNow()).some((x) => x.tabs.some((t) => /↔/.test(t)))) break; }
+    assert(p.length >= 2, 'no second window: ' + p.join(' | '));
+    assert(!(await groupsNow()).some((x) => x.tabs.some((t) => /↔/.test(t))), 'diff still in the main window');
+    for (let i = 0; i < 20 && readSettings()['svnwt.diffPlacement'] !== 'window'; i++) await sleep(250);
+    assert(readSettings()['svnwt.diffPlacement'] === 'window', 'setting not saved: ' + JSON.stringify(readSettings()['svnwt.diffPlacement']));
+    await d.webview(`(doc) => { doc.querySelectorAll('tr.file')[2].click(); return true; }`, 8000, P.sub);
+    let titles = [];
+    for (let i = 0; i < 30; i++) { await sleep(300); titles = await pages(); if (titles.some((t) => /mathutil\.h/.test(t))) break; }
+    const main = await groupsNow();
+    assert(!main.some((x) => x.tabs.some((t) => /↔/.test(t))), 'the next diff opened in the main window: ' + JSON.stringify(main.map((x) => x.tabs)));
+    assert(titles.length === p.length, 'another window was opened: ' + titles.join(' | '));
+    assert(titles.some((t) => /mathutil\.h/.test(t)), 'the diff window does not show the next file: ' + titles.join(' | '));
+    return { note: `창: ${titles.join(' | ')}` };
+  });
+  await step({ scenario: S2, action: '설정을 리뷰 화면 위(review)로 되돌린 뒤 파일 클릭', expect: '다시 리뷰 화면 탭 그룹에 좌우 diff' }, async () => {
+    const cfg = readSettings();
+    cfg['svnwt.diffPlacement'] = 'review';
+    require('fs').writeFileSync(settingsFile, JSON.stringify(cfg, null, 2));
+    await sleep(1500);
+    await d.webview(`(doc) => { doc.querySelector('tr.file').click(); return true; }`, 8000, P.sub);
+    const g = await activeDiff(/main\.cpp .*1\/3/);
+    assert(g.tabs.some((t) => /add sub function/.test(t)), JSON.stringify(g.tabs));
+    await d.key('Escape');
+    await sleep(600);
+    return { note: `탭 그룹: ${g.tabs.join(' | ')}` };
+  });
+
 
   // ---------------------------------------------------------------- 3
   const S3 = '3. 메뉴';
@@ -307,30 +405,60 @@ async function scenarios(d, ctx) {
     const readme = require('fs').readFileSync(path.join(ctx.wc, 'trunk', 'app', 'README.md'), 'utf8');
     assert(!/docs\/guide\.md/.test(readme), readme);
     let b = [];
-    for (let i = 0; i < 30 && b[0] !== 'worktree 정리'; i++) {
+    const PRIMARY = '보관 (worktree 정리)';
+    for (let i = 0; i < 30 && b[0] !== PRIMARY; i++) {
       await sleep(300);
       b = await d.webview(`(doc) => [...doc.querySelectorAll('.next .actions button')].map((x) => x.textContent)`, 8000, P.docs);
     }
-    assert(b[0] === 'worktree 정리', b.join(', '));
+    assert(b[0] === PRIMARY, b.join(', '));
     return { note: `changelist 비움, 알림: ${(await d.notifications()).join(' | ').slice(0, 160)}` };
   });
-  await step({ scenario: S7, action: '커밋 완료된 작업(#1) 리뷰 화면', expect: '"worktree 정리" 주 버튼' }, async () => {
+  await step({ scenario: S7, action: '커밋 완료된 작업(#1) 리뷰 화면', expect: '"보관 (worktree 정리)" 주 버튼, "SVN 남은 변경 정리…"' }, async () => {
     await d.click('.monaco-list-row', 'main에서 mul');
     const r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent) })`, 8000, P.sample);
-    assert(/커밋 완료/.test(r.title), r.title);
+    assert(/커밋 완료/.test(r.title) && r.buttons.includes('SVN 남은 변경 정리…'), JSON.stringify(r));
     return { note: `${r.title} · ${r.buttons.join(', ')}` };
   });
-  await step({ scenario: S7, action: '"worktree 정리" 클릭', expect: '삭제 확인 창' }, async () => {
+  await step({ scenario: S7, action: '"보관 (worktree 정리)" 클릭', expect: '확인 창: 커밋 기록·리뷰·대화는 "보관된 작업"에 남음' }, async () => {
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="remove"]').click(); return true; }`, 8000, P.sample);
     await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 10000, 'dialog');
-    return { note: `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]` };
+    const note = `${await dialog()} [버튼: ${(await dialogButtons()).join(', ')}]`;
+    assert(/보관된 작업/.test(note), note);
+    return { note };
   });
-  await step({ scenario: S7, action: '"삭제" 확인', expect: '트리에서 작업이 사라지고 리뷰 탭 닫힘' }, async () => {
-    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '삭제');
-    await sleep(3500);
-    const rows = await treeRows();
-    assert(!rows.some((r) => r.includes('main에서 mul')), rows.join(' | '));
-    return { note: `남은 작업: ${rows.filter((r) => r.startsWith('#')).map((r) => r.split(' ').slice(0, 1)).join(', ')}` };
+  await step({ scenario: S7, action: '"보관" 확인', expect: '진행 중 목록에서 빠지고 "보관된 작업" 아래로, 리뷰 탭은 보관 기록 화면으로 바뀜' }, async () => {
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '보관');
+    let rows = [];
+    for (let i = 0; i < 30; i++) {
+      await sleep(400);
+      rows = await treeRows();
+      if (!rows.some((r) => /^#\d+ main에서 mul/.test(r)) && rows.some((r) => r.startsWith('보관된 작업'))) break;
+    }
+    assert(!rows.some((r) => /^#\d+ main에서 mul/.test(r)) && rows.some((r) => r.startsWith('보관된 작업')), rows.join(' | '));
+    let h = '';
+    for (let i = 0; i < 30 && !/보관됨/.test(h); i++) {
+      h = await d.webview(`(doc) => doc.querySelector('h1').textContent.replace(/\\s+/g, ' ').trim()`, 8000, P.sample).catch(() => '');
+      if (!/보관됨/.test(h)) await sleep(300);
+    }
+    assert(/보관됨/.test(h), h);
+    return { note: `남은 작업: ${rows.filter((r) => r.startsWith('#')).map((r) => r.split(' ').slice(0, 1)).join(', ')} · 리뷰 탭: ${h}` };
+  });
+  await step({ scenario: S7, action: '"보관된 작업" 펼치기 → 보관한 작업 클릭', expect: '보관 기록: 생성·SVN 커밋·보관 시각, 커밋 목록, 변경 파일, 리뷰' }, async () => {
+    const tw = await d.eval(`(() => { const r = [...document.querySelectorAll('.monaco-list-row')].find((x) => (x.getAttribute('aria-label') || '').startsWith('보관된 작업')); if (!r) return null; const t = r.querySelector('.monaco-tl-twistie'); const b = t.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, expanded: r.getAttribute('aria-expanded') }; })()`);
+    assert(tw, 'archive node');
+    if (tw.expanded !== 'true') { await d.mouse('mousePressed', tw.x, tw.y); await d.mouse('mouseReleased', tw.x, tw.y); }
+    await d.waitFor(`[...document.querySelectorAll('.monaco-list-row')].some((r) => /main에서 mul/.test(r.getAttribute('aria-label') || '') && /커밋 \\d+개/.test(r.getAttribute('aria-label') || ''))`, 8000, 'archived row');
+    await d.click('.monaco-list-row', 'main에서 mul');
+    const r = await d.webview(`(doc) => ({ meta: [...doc.querySelectorAll('header .meta')].map((m) => m.textContent.replace(/\\s+/g, ' ').trim()), commits: doc.querySelectorAll('li.commit').length, files: doc.querySelectorAll('tr.file').length, h2: [...doc.querySelectorAll('h2')].map((x) => x.textContent.replace(/\\s+/g, ' ').trim()) })`, 8000, P.sample);
+    assert(r.commits > 0 && r.files > 0 && /SVN 커밋/.test(r.meta[0]), JSON.stringify(r));
+    return { note: `${r.meta.join(' / ')} · 섹션: ${r.h2.join(', ')}` };
+  });
+  await step({ scenario: S7, action: '보관 기록에서 커밋 클릭', expect: '그 커밋의 변경 (worktree 없이 git 기록으로)' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('li.commit').click(); return true; }`, 8000, P.sample);
+    let tabs = [];
+    for (let i = 0; i < 20 && !tabs.some((t) => /^#\d+ [0-9a-f]{8} /.test(t)); i++) { await sleep(300); tabs = await d.tabs(); }
+    assert(tabs.some((t) => /^#\d+ [0-9a-f]{8} /.test(t)), tabs.join(' | '));
+    return { note: `탭: ${tabs.filter((t) => /^#\d+ [0-9a-f]{8} /.test(t)).join(', ')}` };
   });
 
   // ---------------------------------------------------------------- 8
@@ -381,8 +509,8 @@ async function scenarios(d, ctx) {
     await d.webview(`(doc) => { const a = doc.getElementById('agentInput'); a.value = '남은 작업이 있는지 확인해줘'; a.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })); return true; }`, 8000, prefix);
     await d.waitFor(`[...document.querySelectorAll('.notifications-toasts .notification-list-item-message')].some((e) => /추가 지시 확인/.test(e.textContent))`, 30000, 'second run');
     let tr = '';
-    for (let i = 0; i < 40 && !(/추가 지시 확인/.test(tr) && !/중지 버튼 남음/.test(tr)); i++) {
-      await sleep(300);
+    for (let i = 0; i < 60 && !(/추가 지시 확인/.test(tr) && !/중지 버튼 남음/.test(tr)); i++) {
+      await sleep(500);
       tr = await d.webview(`(doc) => [...doc.getElementById('transcript').children].slice(-3).map((c) => c.textContent.replace(/\\s+/g, ' ').trim()).join(' | ') + (doc.querySelector('button[data-cmd="agentStop"]') ? ' [중지 버튼 남음]' : '')`, 8000, prefix);
     }
     assert(/남은 작업이 있는지/.test(tr) && /추가 지시 확인/.test(tr) && !/중지 버튼 남음/.test(tr), tr);
@@ -476,6 +604,32 @@ async function scenarios(d, ctx) {
     })();
     assert(/\[리뷰 중 요청\] 파일 `?app\/README\.md`? 1행/.test(tr) && /요청: 이 제목 줄은 왜 있어\?/.test(tr) && /선택한 줄 확인/.test(tr), tr.slice(-1500));
     return { note: `입력 창: ${title} / 세션: ${(tr.match(/\[리뷰 중 요청\][^|]{0,80}/) || [''])[0]} … 선택한 줄 확인` };
+  });
+
+  // ---------------------------------------------------------------- 11. after the SVN commit: throw away what is left, keep the worktrees
+  const S11 = '11. SVN 남은 변경 정리 (worktree 는 그대로)';
+  const leftFile = path.join(ctx.wc, 'trunk', 'app', 'src', 'main.cpp'); // README belongs to #7 (waiting for its commit): not offered
+  const leftOrig = fsx.readFileSync(leftFile, 'utf8');
+  await step({ scenario: S11, action: 'SVN 원본 main.cpp 를 직접 고친 상태 → "SVN Worktree: SVN 남은 변경 정리…"', expect: 'scope 폴더의 남은 변경 목록 (버전 관리 안 되는 파일은 기본 해제)' }, async () => {
+    await d.key('Escape');
+    fsx.writeFileSync(leftFile, leftOrig + '// left over\n');
+    await d.command('SVN Worktree: SVN 남은 변경 정리');
+    await d.waitFor(`[...document.querySelectorAll('.quick-input-widget .quick-input-list .monaco-list-row')].some((r) => /main\\.cpp/.test(r.getAttribute('aria-label') || ''))`, 15000, 'quick pick');
+    const items = await quickPickItems();
+    const checked = await d.eval(`[...document.querySelectorAll('.quick-input-widget .quick-input-list .monaco-list-row')].filter((r) => r.getAttribute('aria-checked') === 'true').map((r) => r.getAttribute('aria-label'))`);
+    assert(checked.some((x) => /main\.cpp/.test(x)) && !items.some((x) => /README/.test(x)), JSON.stringify({ items, checked }));
+    return { note: `항목: ${items.join(' | ').slice(0, 300)} · 체크: ${checked.length}` };
+  });
+  await step({ scenario: S11, action: 'Enter → 확인 창 "버리기"', expect: 'main.cpp 가 SVN 원본으로 돌아가고 복사본이 남음, worktree 는 그대로' }, async () => {
+    const wts = ctx.svc.listTasks().map((t) => t.workPath).filter((p) => fsx.existsSync(p));
+    await d.key('Enter');
+    await d.waitFor(`!!document.querySelector('.monaco-dialog-box')`, 10000, 'dialog');
+    const note = await dialog();
+    await d.click('.monaco-dialog-box .dialog-buttons .monaco-button', '버리기');
+    for (let i = 0; i < 40 && fsx.readFileSync(leftFile, 'utf8') !== leftOrig; i++) await sleep(300);
+    assert(fsx.readFileSync(leftFile, 'utf8') === leftOrig, 'main.cpp not reverted');
+    assert(wts.every((p) => fsx.existsSync(p)), 'a worktree was removed');
+    return { note: `${note.slice(0, 120)} / 알림: ${(await d.notifications()).join(' | ').slice(0, 160)}` };
   });
 }
 

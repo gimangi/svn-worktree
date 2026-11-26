@@ -186,29 +186,167 @@ async function autoAddWorktrees(ctx) {
 }
 
 // ------------------------------------------------------------------ diff helpers
-function diffUris(scope, task, base, f) {
+function diffUris(scope, task, base, f, tip) {
   const left = f.status === 'A' ? GitFs.uri(scope.id, 'empty', f.path) : GitFs.uri(scope.id, base, f.from || f.path);
-  const right = f.status === 'D' ? GitFs.uri(scope.id, 'empty', f.path) : vscode.Uri.file(path.join(task.workPath, ...f.path.split('/')));
+  // archived: no worktree, the right side is the kept tip commit
+  const right = f.status === 'D' ? GitFs.uri(scope.id, 'empty', f.path)
+    : task.status === 'archived' ? GitFs.uri(scope.id, tip, f.path) : vscode.Uri.file(path.join(task.workPath, ...f.path.split('/')));
   return { left, right };
 }
 
-// Opened from the review panel (or while it is the active tab): show the file next to it in one reused preview tab,
-// so the panel stays visible and the next click replaces the previous diff
-function reviewIsActive() {
+/**
+ * Where a task's diff / file opens. Always in the window of the task's review panel (also when the panel was
+ * moved to a new window and the click came from the sidebar of the main window):
+ * - svnwt.diffPlacement "review" (default): in the review panel's own tab group, full width, so VS Code shows the
+ *   two sides next to each other; one preview tab is reused, and the diff title bar has 이전/다음 파일 and 리뷰 화면
+ * - "beside": next to the review panel (narrow: VS Code may switch to the inline diff)
+ * - "window": in a separate window of its own (the first diff is moved there, later ones reuse it)
+ * Without an open review panel: the active editor group.
+ * The diff title bar buttons 새 창으로 분리 / 리뷰 화면 탭으로 switch between "window" and "review" and save the
+ * choice in the setting, so the next diff opens the same way.
+ */
+const diffPlacement = () => vscode.workspace.getConfiguration('svnwt').get('diffPlacement', 'review');
+const setDiffPlacement = (v) => vscode.workspace.getConfiguration('svnwt').update('diffPlacement', v, vscode.ConfigurationTarget.Global);
+const isReviewTab = (t) => t.input instanceof vscode.TabInputWebview && /svnwt\.review/.test(t.input.viewType);
+const isTaskDiffTab = (t) => t.input instanceof vscode.TabInputTextDiff && t.input.original.scheme === SCHEME && /↔ #\d+/.test(String(t.label));
+/** The tab group holding a detached task diff (no review panel in it): the separate diff window. */
+function detachedDiffGroup() {
+  try { return vscode.window.tabGroups.all.find((g) => g.tabs.some(isTaskDiffTab) && !g.tabs.some(isReviewTab)) || null; } catch (_) { return null; }
+}
+async function focusReviewOf(taskId) {
+  const rp = ReviewPanel.panels.get(taskId);
+  if (!rp || rp.disposed) return false;
+  rp.panel.reveal(rp.panel.viewColumn, false); // makes its group (and window) the active one
+  await new Promise((r) => setTimeout(r, 60));
+  return true;
+}
+async function showOptions(taskId) {
+  if (taskId && await focusReviewOf(taskId)) {
+    // the review's own column by number: "active" can still be another window (a detached diff window)
+    const col = ReviewPanel.panels.get(taskId).panel.viewColumn || vscode.ViewColumn.Active;
+    return diffPlacement() === 'beside'
+      ? { preview: true, preserveFocus: false, viewColumn: vscode.ViewColumn.Beside }
+      : { preview: true, preserveFocus: false, viewColumn: col };
+  }
+  return { preview: true };
+}
+
+let extCtx = null;
+/**
+ * In a narrow editor VS Code merges the two sides into one column (diffEditor.useInlineViewWhenSpaceIsLimited).
+ * Asked once, on the first task diff: keep the two sides always. It is the user's own editor setting, so it is
+ * only changed on their yes.
+ */
+async function offerSideBySide() {
+  try {
+    if (!extCtx || extCtx.globalState.get('diffSideBySideAsked')) return;
+    const cfg = vscode.workspace.getConfiguration('diffEditor');
+    await extCtx.globalState.update('diffSideBySideAsked', true);
+    if (cfg.get('useInlineViewWhenSpaceIsLimited') === false) return;
+    const a = await vscode.window.showInformationMessage('편집기 칸이 좁으면 VS Code 가 diff 를 한 줄로 합쳐 보여 줍니다. 좁아도 항상 좌우로 볼까요? (VS Code 설정 diffEditor.useInlineViewWhenSpaceIsLimited 를 끕니다)', '항상 좌우로', '그대로');
+    if (a === '항상 좌우로') await cfg.update('useInlineViewWhenSpaceIsLimited', false, vscode.ConfigurationTarget.Global);
+  } catch (_) { /* optional */ }
+}
+
+// the diff on screen and its place in the task's file list (이전/다음 파일)
+let diffNav = null;
+function updateDiffNavContext() {
+  let on = false;
   try {
     const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    return !!(tab && tab.input instanceof vscode.TabInputWebview && /svnwt.review/.test(tab.input.viewType));
-  } catch (_) { return false; }
-}
-function showOptions(beside) {
-  return beside || reviewIsActive() ? { preview: true, preserveFocus: true, viewColumn: vscode.ViewColumn.Beside } : { preview: true };
+    const inp = tab && tab.input;
+    on = !!(diffNav && inp instanceof vscode.TabInputTextDiff && inp.modified.toString() === diffNav.right);
+  } catch (_) { on = false; }
+  vscode.commands.executeCommand('setContext', 'svnwt.diffNav', on);
 }
 
 async function openFileDiff(taskId, f, opts = {}) {
   const { scope, task } = service.resolveTask(taskId);
   const info = await service.taskInfo(task.id, { checkSvn: false });
-  const { left, right } = diffUris(scope, task, info.base, f);
-  await vscode.commands.executeCommand('vscode.diff', left, right, `${path.posix.basename(f.path)} (r${scope.revision} ↔ #${task.no})`, showOptions(opts.beside));
+  const files = info.files || [];
+  const idx = Math.max(0, files.findIndex((x) => x.path === f.path));
+  const { left, right } = diffUris(scope, task, info.base, f, info.tip);
+  diffNav = { taskId: task.id, files, index: idx, right: right.toString(), left: left.toString(), fresh: true };
+  const pos = files.length > 1 ? ` ${idx + 1}/${files.length}` : '';
+  let where;
+  let detach = false;
+  const own = diffPlacement() === 'window' ? detachedDiffGroup() : null;
+  if (own) where = { preview: true, preserveFocus: false, viewColumn: own.viewColumn };
+  else { where = await showOptions(task.id); detach = diffPlacement() === 'window'; }
+  await vscode.commands.executeCommand('vscode.diff', left, right, `${path.posix.basename(f.path)} (r${scope.revision} ↔ #${task.no}${pos})`, where);
+  if (detach) await moveDiffToNewWindow();
+  updateDiffNavContext();
+  offerSideBySide();
+}
+
+async function moveDiffToNewWindow() {
+  try { await vscode.commands.executeCommand('workbench.action.moveEditorToNewWindow'); return true; } catch (_) {
+    vscode.window.showWarningMessage('이 VS Code 버전은 편집기를 새 창으로 옮기지 못합니다 (1.85 이상 필요). 리뷰 화면 탭에 엽니다.');
+    await setDiffPlacement('review');
+    return false;
+  }
+}
+
+/** 이전/다음 파일. edge: put the cursor on that file's 'first' / 'last' change (F7 walking across files). */
+async function stepDiff(delta, edge) {
+  if (!diffNav || !diffNav.files.length) return;
+  const n = diffNav.files.length;
+  const i = (diffNav.index + delta + n) % n;
+  const f = diffNav.files[i];
+  // stay in the group the current diff is in
+  const { scope, task } = service.resolveTask(diffNav.taskId);
+  const info = await service.taskInfo(task.id, { checkSvn: false });
+  const { left, right } = diffUris(scope, task, info.base, f, info.tip);
+  // stay in the tab group the current diff is in (wherever the focus is)
+  const cur = diffNav.right;
+  const home = vscode.window.tabGroups.all.find((g) => g.tabs.some((t) => t.input instanceof vscode.TabInputTextDiff && t.input.modified.toString() === cur));
+  diffNav = { taskId: task.id, files: info.files, index: i, right: right.toString(), left: left.toString(), fresh: true };
+  await vscode.commands.executeCommand('vscode.diff', left, right, `${path.posix.basename(f.path)} (r${scope.revision} ↔ #${task.no} ${i + 1}/${n})`,
+    { preview: true, viewColumn: home ? home.viewColumn : vscode.ViewColumn.Active });
+  updateDiffNavContext();
+  if (n > 1 && ((delta > 0 && i === 0) || (delta < 0 && i === n - 1))) vscode.window.setStatusBarMessage(delta > 0 ? '마지막 파일 다음: 첫 파일로 돌아왔습니다.' : '첫 파일 이전: 마지막 파일로 갔습니다.', 3000);
+  if (edge) await gotoChange(edge);
+}
+
+/** The diff's text editor that has the focus (either side), once the diff opened. */
+async function diffEditor() {
+  for (let i = 0; i < 20; i++) {
+    const ed = vscode.window.activeTextEditor;
+    const u = ed && ed.document.uri.toString();
+    if (diffNav && (u === diffNav.right || u === diffNav.left)) return ed;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return null;
+}
+function revealChange(ed, h) {
+  const line = Math.min(ed.document.lineCount, ed.document.uri.toString() === diffNav.right ? h.new : h.old);
+  const pos = new vscode.Position(Math.max(0, line - 1), 0);
+  ed.selection = new vscode.Selection(pos, pos);
+  ed.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  diffNav.fresh = false;
+}
+const changesOf = (nav) => { const f = nav.files[nav.index]; return service.changeLines(nav.taskId, f.path, f.from).catch(() => []); };
+async function gotoChange(edge) {
+  const ed = await diffEditor();
+  const hunks = await changesOf(diffNav);
+  if (ed && hunks.length) revealChange(ed, edge === 'last' ? hunks[hunks.length - 1] : hunks[0]);
+}
+/** 다음/이전 변경 (F7 / Shift+F7): past the last change of a file it continues in the next file. */
+async function stepChange(delta) {
+  if (!diffNav) return;
+  const ed = await diffEditor();
+  const hunks = await changesOf(diffNav);
+  if (ed && hunks.length) {
+    const right = ed.document.uri.toString() === diffNav.right;
+    const at = (h) => Math.min(ed.document.lineCount, right ? h.new : h.old);
+    const cur = ed.selection.active.line + 1;
+    const target = delta > 0
+      ? (diffNav.fresh && at(hunks[0]) <= cur ? hunks[0] : hunks.find((h) => at(h) > cur))
+      : hunks.slice().reverse().find((h) => at(h) < cur);
+    if (target) { revealChange(ed, target); return; }
+    if (diffNav.files.length < 2) { revealChange(ed, delta > 0 ? hunks[0] : hunks[hunks.length - 1]); return; }
+  }
+  await stepDiff(delta, delta > 0 ? 'first' : 'last');
 }
 
 async function openChanges(taskId) {
@@ -216,9 +354,10 @@ async function openChanges(taskId) {
   const info = await service.taskInfo(task.id, { checkSvn: false });
   if (!info.files.length) { vscode.window.showInformationMessage('커밋된 변경 사항이 없습니다.'); return; }
   const resources = info.files.map((f) => {
-    const { left, right } = diffUris(scope, task, info.base, f);
-    return [vscode.Uri.file(path.join(task.workPath, ...f.path.split('/'))), left, right];
+    const { left, right } = diffUris(scope, task, info.base, f, info.tip);
+    return [task.status === 'archived' ? GitFs.uri(scope.id, info.tip, f.path) : vscode.Uri.file(path.join(task.workPath, ...f.path.split('/'))), left, right];
   });
+  await focusReviewOf(task.id); // vscode.changes opens in the active group: the review's
   await vscode.commands.executeCommand('vscode.changes', `#${task.no} ${task.title} — 변경 사항 (${info.files.length})`, resources);
 }
 
@@ -232,6 +371,7 @@ async function openCommit(taskId, sha) {
     const right = f.status === 'D' ? GitFs.uri(scope.id, 'empty', f.path) : GitFs.uri(scope.id, c.sha, f.path);
     return [GitFs.uri(scope.id, c.sha, f.path), left, right];
   });
+  await focusReviewOf(task.id);
   await vscode.commands.executeCommand('vscode.changes', `#${task.no} ${c.sha.slice(0, 8)} ${c.subject} (${c.files.length})`, resources);
 }
 
@@ -348,11 +488,13 @@ function updateInTaskContext() {
 }
 
 async function openTaskFile(taskId, rel, line, opts = {}) {
-  const { task } = service.resolveTask(taskId);
-  const uri = vscode.Uri.file(path.join(task.workPath, ...String(rel).split('/')));
+  const { scope, task } = service.resolveTask(taskId);
+  const uri = task.status === 'archived'
+    ? GitFs.uri(scope.id, (await service.taskInfo(task.id, { checkSvn: false })).tip || 'empty', String(rel))
+    : vscode.Uri.file(path.join(task.workPath, ...String(rel).split('/')));
   const doc = await vscode.workspace.openTextDocument(uri);
   const pos = new vscode.Position(Math.max(0, (line || 1) - 1), 0);
-  await vscode.window.showTextDocument(doc, { ...showOptions(opts.beside), selection: new vscode.Range(pos, pos) });
+  await vscode.window.showTextDocument(doc, { ...(await showOptions(task.id)), selection: new vscode.Range(pos, pos) });
 }
 
 // ------------------------------------------------------------------ environment
@@ -492,8 +634,27 @@ function registerCommands(ctx) {
   reg('svnwt.openFileDiff', (taskId, f, opts) => openFileDiff(taskId, f, opts));
   reg('svnwt.openCommit', (taskId, sha) => openCommit(taskId, sha));
   reg('svnwt.askAboutSelection', () => askAboutSelection());
-  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => updateInTaskContext()));
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => { updateInTaskContext(); updateDiffNavContext(); }));
+  ctx.subscriptions.push(vscode.window.tabGroups.onDidChangeTabs(() => updateDiffNavContext()));
   updateInTaskContext();
+  reg('svnwt.nextFile', () => stepDiff(1));
+  reg('svnwt.prevFile', () => stepDiff(-1));
+  reg('svnwt.nextChange', () => stepChange(1));
+  reg('svnwt.prevChange', () => stepChange(-1));
+  reg('svnwt.backToReview', () => { if (diffNav) ReviewPanel.show(ctxApi, diffNav.taskId, {}); });
+  // the choice is saved in the setting: the next diff opens the same way
+  reg('svnwt.diffToWindow', async () => {
+    await setDiffPlacement('window');
+    await moveDiffToNewWindow();
+    updateDiffNavContext();
+  });
+  reg('svnwt.diffToReview', async () => {
+    await setDiffPlacement('review');
+    if (!diffNav) return;
+    const { taskId, files, index } = diffNav;
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    await openFileDiff(taskId, files[index]);
+  });
 
   reg('svnwt.askCopilotReview', async (arg) => {
     const t = await pickTask(arg);
@@ -671,33 +832,98 @@ function registerCommands(ctx) {
   });
 
   reg('svnwt.removeTask', async (arg) => {
-    const t = await pickTask(arg);
+    const t = await pickTask(arg, (x) => x.status !== 'archived');
+    if (t.status === 'archived') return;
     let force = false;
+    const keep = '커밋 기록·리뷰·에이전트 대화는 사이드바 "보관된 작업"에 남습니다. worktree 에 커밋되지 않은 변경이 있으면 커밋해서 같이 보관합니다.';
     if (t.status === 'landed') {
-      const a = await vscode.window.showWarningMessage(`#${t.no} 의 changelist가 아직 SVN에 커밋되지 않았습니다. worktree만 삭제하고 SVN working copy의 변경은 그대로 둘까요?`, { modal: true }, '삭제');
-      if (a !== '삭제') return;
+      const a = await vscode.window.showWarningMessage(`#${t.no} 의 changelist가 아직 SVN에 커밋되지 않았습니다. worktree만 정리(보관)하고 SVN working copy의 변경은 그대로 둘까요?`, { modal: true, detail: keep }, '보관');
+      if (a !== '보관') return;
       force = true;
     } else if (t.status === 'committed' && (await service.leftovers(t.id).catch(() => [])).length) {
       const n = (await service.leftovers(t.id)).length;
       const a = await vscode.window.showWarningMessage(`커밋에서 빠진 변경 ${n}개가 남아 있습니다. 같이 버릴까요?`,
-        { modal: true, detail: '버리면 이 작업의 변경만 SVN working copy 에서 되돌립니다.' },
-        '버리고 삭제', '그대로 두고 삭제');
+        { modal: true, detail: `버리면 이 작업의 변경만 SVN working copy 에서 되돌립니다.\n\n${keep}` },
+        '버리고 보관', '그대로 두고 보관');
       if (!a) return;
-      if (a === '버리고 삭제') {
+      if (a === '버리고 보관') {
         const r = await withProgress(`#${t.no} 남은 변경을 버리는 중…`, () => service.discardLeftovers(t.id));
         const c = r.files.filter((f) => f.action === 'conflict');
         if (c.length) vscode.window.showWarningMessage(`직접 확인해야 하는 파일: ${c.map((x) => x.path).join(', ')}`);
       }
     } else {
-      const a = await vscode.window.showWarningMessage(`#${t.no} "${t.title}" worktree와 브랜치를 삭제할까요?`, { modal: true }, '삭제');
-      if (a !== '삭제') return;
+      const a = await vscode.window.showWarningMessage(`#${t.no} "${t.title}" 을 보관할까요? worktree 폴더와 브랜치를 지웁니다.`, { modal: true, detail: keep }, '보관');
+      if (a !== '보관') return;
       force = t.status !== 'committed';
     }
-    for (const p of ReviewPanel.panels.values()) if (p.taskId === t.id) p.panel.dispose();
     await removeFromWorkspace(t);
-    const r = await service.removeTask(t.id, { force });
+    const r = await withProgress(`#${t.no} 보관하는 중…`, () => service.removeTask(t.id, { force }));
     refreshAll();
+    ReviewPanel.refreshAll();
     if (r.warnings.length) vscode.window.showWarningMessage(r.warnings.join('\n'));
+    else vscode.window.setStatusBarMessage(`#${t.no} 을 보관했습니다 (보관된 작업에서 조회).`, 5000);
+  });
+
+  reg('svnwt.purgeTask', async (arg) => {
+    const t = await pickTask(arg, (x) => x.status === 'archived');
+    if (t.status !== 'archived') return;
+    const a = await vscode.window.showWarningMessage(`#${t.no} "${t.title}" 의 보관 기록을 완전히 삭제할까요?`,
+      { modal: true, detail: '커밋 기록, 리뷰, 에이전트 대화, 첨부한 테스트 화면이 지워지며 되돌릴 수 없습니다.' }, '삭제');
+    if (a !== '삭제') return;
+    for (const p of ReviewPanel.panels.values()) if (p.taskId === t.id) p.panel.dispose();
+    await service.purgeTask(t.id);
+    refreshAll();
+  });
+
+  reg('svnwt.showArchived', async (arg) => {
+    const scopeId = arg && arg.scope ? arg.scope.id : undefined;
+    const list = service.listArchived({ scope: scopeId });
+    if (!list.length) { vscode.window.showInformationMessage('보관된 작업이 없습니다.'); return; }
+    const pick = await vscode.window.showQuickPick(list.map((t) => ({
+      label: `#${t.no} ${t.title}`,
+      description: [String(t.archivedAt || '').slice(0, 10), t.archive ? `커밋 ${t.archive.commits}개` : '기록 없음'].join(' · '),
+      detail: t.description ? t.description.split('\n')[0] : undefined, t,
+    })), { title: '보관된 작업', placeHolder: '제목·설명으로 검색', matchOnDescription: true, matchOnDetail: true });
+    if (pick) ReviewPanel.show(ctxApi, pick.t.id, {});
+  });
+
+  reg('svnwt.discardScopeChanges', async (arg) => {
+    let scopeId = arg && arg.scope ? arg.scope.id : null;
+    if (!scopeId && taskIdOf(arg)) scopeId = service.resolveTask(taskIdOf(arg)).scope.id;
+    if (!scopeId) {
+      const scopes = service.listScopes();
+      if (!scopes.length) return;
+      scopeId = scopes.length === 1 ? scopes[0].id
+        : await vscode.window.showQuickPick(scopes.map((s) => ({ label: s.id, description: s.svnPath })), { title: '어느 scope 폴더를 정리할까요?' }).then((x) => x && x.label);
+      if (!scopeId) return;
+    }
+    const sc = await withProgress('SVN 남은 변경을 확인하는 중…', () => service.scopeChanges(scopeId));
+    if (sc.commitInProgress) { vscode.window.showWarningMessage('커밋 준비 중에는 정리할 수 없습니다. 커밋을 끝내거나 취소한 뒤 다시 시도하세요.'); return; }
+    const free = sc.changes.filter((c) => !c.locked);
+    const locked = sc.changes.filter((c) => c.locked);
+    if (!free.length) {
+      vscode.window.showInformationMessage(`${sc.svnPath} 에 남은 SVN 변경이 없습니다.${locked.length ? ` (커밋 대기 작업 파일 ${locked.length}개 제외)` : ''}`);
+      return;
+    }
+    const ITEM = { modified: '수정', added: '추가', deleted: '삭제', missing: '없음', replaced: '교체', conflicted: '충돌', merged: '병합', unversioned: '버전 관리 안 됨' };
+    const picks = await vscode.window.showQuickPick(free.map((c) => ({
+      label: c.path + (c.isDir ? '/' : ''),
+      description: [ITEM[c.item] || c.item, c.task ? `#${c.task.no} ${c.task.title}` : c.changelist].filter(Boolean).join(' · '),
+      picked: c.item !== 'unversioned', c,
+    })), {
+      canPickMany: true, ignoreFocusOut: true, title: `SVN 남은 변경 정리 — ${sc.svnPath}`,
+      placeHolder: `버릴 변경 선택 (버전 관리 안 되는 파일은 기본 해제${locked.length ? `, 커밋 대기 작업 파일 ${locked.length}개 제외` : ''}). worktree 와 git 커밋은 그대로입니다.`,
+    });
+    if (!picks || !picks.length) return;
+    const a = await vscode.window.showWarningMessage(`SVN working copy 에서 ${picks.length}개 변경을 버릴까요?`,
+      { modal: true, detail: '수정은 revert, 추가·버전 관리 안 되는 파일은 삭제합니다. 버리기 전에 파일을 svnwt 저장 폴더(discarded)에 복사해 둡니다. worktree 와 git 커밋은 건드리지 않습니다.' }, '버리기');
+    if (a !== '버리기') return;
+    const r = await withProgress(`SVN 변경 ${picks.length}개를 버리는 중…`, () => service.discardScopeChanges(scopeId, picks.map((p) => p.c.path)));
+    refreshAll();
+    ReviewPanel.refreshAll();
+    const msg = `SVN 변경 ${r.discarded.length - r.failed.length}개를 버렸습니다.${r.failed.length ? ` 남은 것: ${r.failed.join(', ')}` : ''}`;
+    const b = await (r.failed.length ? vscode.window.showWarningMessage(msg, '복사본 폴더 열기') : vscode.window.showInformationMessage(msg, '복사본 폴더 열기'));
+    if (b && r.backup) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(r.backup));
   });
 
   reg('svnwt.addRule', async () => {
@@ -985,8 +1211,13 @@ async function afterCommit(t, res, output) {
       if (a === '남은 변경 버리기') vscode.commands.executeCommand('svnwt.discardLeftovers', t.id);
       return;
     }
-    const a = await vscode.window.showInformationMessage(`#${t.no} "${t.title}" SVN 커밋 완료${m ? ` (r${m[1]})` : ''}. worktree 를 정리할까요?`, '정리', '나중에');
-    if (a === '정리') vscode.commands.executeCommand('svnwt.removeTask', t.id);
+    // what else is still modified in the scope folder (set-aside edits put back, other changelists)
+    const rest = await service.scopeChanges(service.resolveTask(t.id).scope.id).then((x) => x.changes.filter((c) => !c.locked && c.item !== 'unversioned').length).catch(() => 0);
+    const a = await vscode.window.showInformationMessage(
+      `#${t.no} "${t.title}" SVN 커밋 완료${m ? ` (r${m[1]})` : ''}.${rest ? ` scope 폴더에 다른 SVN 변경 ${rest}개가 남아 있습니다.` : ''} 작업을 보관할까요? (커밋 기록은 남습니다)`,
+      ...(rest ? ['남은 SVN 변경 정리…'] : []), '보관', '나중에');
+    if (a === '보관') vscode.commands.executeCommand('svnwt.removeTask', t.id);
+    if (a === '남은 SVN 변경 정리…') vscode.commands.executeCommand('svnwt.discardScopeChanges', t.id);
   } else if (output) {
     vscode.window.showErrorMessage(`#${t.no} SVN 커밋 실패 — 파일은 원래대로 되돌렸습니다.\n${output.slice(-600)}`);
   } else {
@@ -1190,6 +1421,7 @@ async function migrateSettings() {
 }
 
 async function activate(ctx) {
+  extCtx = ctx;
   output = vscode.window.createOutputChannel('SVN Worktree');
   ctx.subscriptions.push(output);
   setup.applyToolEnv();

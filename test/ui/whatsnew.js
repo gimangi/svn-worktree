@@ -1,4 +1,5 @@
 'use strict';
+require('../hide-windows');
 /** docs/ui-test/whats-new.html: what changed in this release, illustrated with the UI test screenshots. */
 const fs = require('fs');
 const path = require('path');

@@ -66,7 +66,7 @@ const TOOLS = [
   {
     name: 'svnwt_task_list',
     description: 'List svnwt tasks (active, landed = changelist waiting for SVN commit, committed).',
-    inputSchema: { type: 'object', properties: { scope: str('Optional scope id or path.'), includeArchived: bool('Include removed tasks.') } },
+    inputSchema: { type: 'object', properties: { scope: str('Optional scope id or path.'), includeArchived: bool('Include archived tasks.') } },
     handler: (svc, a) => svc.listTasks({ scope: a.scope, includeArchived: !!a.includeArchived })
       .map((t) => ({ id: t.id, scope: t.scopeId, title: t.title, status: t.status, workPath: t.workPath, changelist: t.changelist, createdAt: t.createdAt })),
   },
@@ -202,9 +202,9 @@ const TOOLS = [
   },
   {
     name: 'svnwt_task_remove',
-    description: 'Delete a task worktree (and branch) after its changelist was committed or when the user abandons it.',
-    inputSchema: { type: 'object', required: ['task'], properties: { task: TASK, force: bool('Remove even if the changelist is not committed yet.'), keepBranch: bool('Keep the git branch.') } },
-    handler: (svc, a) => svc.removeTask(a.task, { force: !!a.force, keepBranch: !!a.keepBranch }),
+    description: 'Archive a task after its changelist was committed or when the user abandons it: deletes the worktree folder and the branch; the commits, reviews and agent session stay viewable under "보관된 작업" (svnwt_task_info / svnwt_task_diff still work on it).',
+    inputSchema: { type: 'object', required: ['task'], properties: { task: TASK, force: bool('Remove even if the changelist is not committed yet.'), keepBranch: bool('Keep the git branch.'), keepHistory: { type: 'boolean', description: 'Keep the commits in the archive (default true).' } } },
+    handler: (svc, a) => svc.removeTask(a.task, { force: !!a.force, keepBranch: !!a.keepBranch, keepHistory: a.keepHistory !== false }),
   },
   {
     name: 'svnwt_path_map',

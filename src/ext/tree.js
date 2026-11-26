@@ -6,14 +6,14 @@ const STATUS_LABEL = {
   active: '진행 중',
   landed: '커밋 대기',
   committed: '커밋 완료',
-  archived: '삭제됨',
+  archived: '보관됨',
 };
 // longer wording for tooltips / review header
 const STATUS_TEXT = {
   active: '진행 중 (worktree 에서 작업)',
   landed: 'SVN changelist 준비됨 · 사람의 커밋 대기',
   committed: 'SVN 커밋 완료',
-  archived: '삭제됨',
+  archived: '보관됨 (worktree 삭제, 커밋 기록 보관)',
 };
 const STATUS_ICON = {
   active: new vscode.ThemeIcon('git-branch', new vscode.ThemeColor('charts.blue')),
@@ -109,15 +109,44 @@ class TaskTree {
           return { kind: 'file', item: it };
         });
       }
+      if (el.kind === 'archive') {
+        return this.service.listArchived({ scope: el.scope.id }).map((t) => {
+          const it = new vscode.TreeItem(`#${t.no} ${t.title}`);
+          const a = t.archive;
+          const before = a && a.statusBefore === 'committed' ? 'SVN 커밋됨' : a ? '커밋 안 함' : '';
+          it.description = [String(t.archivedAt || '').slice(0, 10), before, a ? `커밋 ${a.commits}개` : '기록 없음'].filter(Boolean).join(' · ');
+          it.iconPath = new vscode.ThemeIcon(a ? 'history' : 'archive');
+          const lines = [`**#${t.no} ${t.title}**`, '', t.description || '', '', `- 생성: ${t.createdAt}`, `- 보관: ${t.archivedAt || '-'}`];
+          if (t.committedAt) lines.push(`- SVN 커밋: ${t.committedAt}`);
+          lines.push(a ? `- 커밋 ${a.commits}개 · 파일 ${a.files}개` : '- 0.4.7 이하 버전에서 정리되어 커밋 기록이 없습니다');
+          it.tooltip = new vscode.MarkdownString(lines.join('\n'));
+          it.contextValue = 'task.archived';
+          it.command = { command: 'svnwt.openReview', title: '기록 보기', arguments: [{ kind: 'task', task: t }, { preserveFocus: true }] };
+          it.id = 'archived:' + t.id;
+          return { kind: 'task', task: t, item: it };
+        });
+      }
       if (el.kind === 'scope') {
         const tasks = this.service.listTasks({ scope: el.scope.id });
+        const archived = this.service.listArchived({ scope: el.scope.id });
+        const tail = [];
+        if (archived.length) {
+          const it = new vscode.TreeItem('보관된 작업', vscode.TreeItemCollapsibleState.Collapsed);
+          it.description = `${archived.length}개`;
+          it.tooltip = '정리한 작업의 커밋 기록, 리뷰, 에이전트 대화';
+          it.accessibilityInformation = { label: `보관된 작업 ${archived.length}개` };
+          it.iconPath = new vscode.ThemeIcon('history');
+          it.contextValue = 'archive';
+          it.id = 'archive:' + el.scope.id;
+          tail.push({ kind: 'archive', scope: el.scope, item: it });
+        }
         if (!tasks.length) {
           const it = new vscode.TreeItem('작업 없음 — + 버튼으로 새 작업 만들기');
           it.command = { command: 'svnwt.createTask', title: '새 작업', arguments: [el] };
           it.iconPath = new vscode.ThemeIcon('info');
-          return [{ kind: 'hint', item: it }];
+          return [{ kind: 'hint', item: it }, ...tail];
         }
-        return tasks.slice().reverse().map((t) => {
+        return [...tasks.slice().reverse().map((t) => {
           const it = new vscode.TreeItem(`#${t.no} ${t.title}`, vscode.TreeItemCollapsibleState.Collapsed);
           const nFiles = t.landed && t.landed.files ? t.landed.files.length : null;
           it.description = (STATUS_LABEL[t.status] || t.status) + (t.status === 'landed' && nFiles !== null ? ` · ${nFiles}파일` : '');
@@ -150,7 +179,7 @@ class TaskTree {
           it.command = { command: 'svnwt.openReview', title: '리뷰', arguments: [{ kind: 'task', task: t }, { preserveFocus: true }] };
           it.id = 'task:' + t.id + ':' + t.status;
           return { kind: 'task', task: t, item: it };
-        });
+        }), ...tail];
       }
       if (el.kind === 'task') {
         const info = await this.service.taskInfo(el.task.id, { checkSvn: false });

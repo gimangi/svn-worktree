@@ -17,7 +17,7 @@ SVN working copy (D:\svn\proj)            svnwt 저장 위치 (D:\svn\proj.svnwt
 1. **Git for Windows** 설치: <https://git-scm.com/download/win> 또는 `winget install --id Git.Git -e`
 2. **SVN 명령줄 클라이언트** 설치: TortoiseSVN 설치 시 *command line client tools* 선택
    (`winget install --id TortoiseSVN.TortoiseSVN -e --override "/passive ADDLOCAL=ALL"`)
-3. 확장 설치: `code --install-extension svn-worktree-0.4.7.vsix`
+3. 확장 설치: `code --install-extension svn-worktree-0.4.8.vsix`
    (또는 VS Code 확장 보기 → `...` → *VSIX에서 설치*)
 4. VS Code 재시작
 
@@ -46,8 +46,13 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
    - 오래 걸리면 진행 알림의 *취소* 로 멈출 수 있습니다 (빼 둔 변경을 되돌림). 단계별 진행과 실행한 svn/git 명령은 출력 패널 *SVN Worktree* 에 남습니다.
    - 커밋이 감지되거나 *커밋 취소* 를 누르면, 보관했던 변경을 changelist 까지 그대로 되돌립니다. 커밋된 내용과 겹쳐 되돌릴 수 없는 파일은 보관본을 남기고 알려 줍니다.
    - 작업끼리 working copy 에서 부딪히지 않습니다. 막히는 경우는 SVN 에 새로 커밋된 내용과 같은 줄을 고쳤을 때뿐이며, 이때는 *rebase 후 커밋 준비* 로 이어집니다.
+5. **커밋 후 정리** — 커밋이 끝나면 두 가지를 따로 할 수 있습니다.
+   - *SVN 남은 변경 정리…* (리뷰 화면, scope 우클릭, 명령 팔레트): scope 폴더에 남은 SVN 변경(되돌려 놓은 다른 로컬 수정, 커밋에서 뺀 파일 등)을 골라 버립니다. worktree 와 git 커밋은 그대로입니다. 버리기 전에 파일을 svnwt 저장 폴더의 `discarded\` 에 복사해 둡니다. 버전 관리 안 되는 파일은 기본으로 선택되지 않고, 커밋 대기 중인 작업 파일은 목록에서 빠집니다.
+   - *보관 (worktree 정리)*: worktree 폴더와 브랜치를 지우고 진행 중 목록에서 뺍니다. 커밋 기록(`refs/svnwt/archive/<작업>`)·리뷰·에이전트 대화·테스트 화면은 남아서 scope 아래 *보관된 작업* 에서 커밋별 diff 까지 볼 수 있습니다 (돋보기 버튼으로 제목 검색). 커밋하지 않은 worktree 변경은 커밋해서 같이 보관합니다. 완전히 지우려면 보관된 작업 우클릭 → *보관 기록 삭제*.
 
-**일부만 고치거나 되돌리기** — 리뷰 화면에서 파일을 누르면 옆 칸에 diff 가 열립니다. 오른쪽은 worktree 의 실제 파일이라 바로 고칠 수 있고, 변경 블록 사이의 화살표(*Revert Block*)로 그 부분만 SVN 기준으로 되돌릴 수 있습니다. 특정 부분을 에이전트에게 고치게 하려면 그 줄을 선택하고 Copilot 인라인 채팅(Ctrl+I)이나 채팅에 지시하세요. 저장한 변경은 *커밋 준비* 때 함께 올라갑니다 (git 커밋 여부를 물어봄).
+**일부만 고치거나 되돌리기** — 리뷰 화면에서 파일을 누르면 리뷰 화면이 있는 탭 그룹에 diff 가 전체 폭으로 열립니다 (양쪽 비교). 제목줄의 *이전/다음 변경 파일* 로 넘겨 보고 *리뷰 화면* 으로 돌아갑니다. *새 창으로 분리* 를 누르면 diff 전용 창에서 보고, 그 방식이 저장되어 다음에도 새 창에 열립니다 (*리뷰 화면 탭으로* 로 되돌림, 설정 `svnwt.diffPlacement`). 오른쪽은 worktree 의 실제 파일이라 바로 고칠 수 있고, 변경 블록 사이의 화살표(*Revert Block*)로 그 부분만 SVN 기준으로 되돌릴 수 있습니다. 특정 부분을 에이전트에게 묻거나 고치게 하려면 그 줄을 선택하고 우클릭 → *이 부분 질문/수정 지시…* (파일·줄 위치, 선택한 코드, 그 부분 diff 가 같이 전달됨). 저장한 변경은 *커밋 준비* 때 함께 올라갑니다 (git 커밋 여부를 물어봄).
+
+**키보드로 리뷰** — 리뷰 화면: `↑` `↓` (또는 `j` `k`) 로 파일·커밋 행 이동, `Enter` 로 열기. diff: `F7` / `Shift+F7` 다음·이전 변경 (파일 끝에서 다음 파일로 이어짐), `Alt+→` / `Alt+←` 다음·이전 파일, `Esc` 리뷰 화면으로 (보던 행에 그대로), `Alt+Q` 선택한 부분 질문/수정 지시. VS Code *바로 가기 키* 에서 `svnwt` 로 검색해 바꿀 수 있습니다.
 
 **규칙** — 작업 피드백 중 앞으로 항상 지킬 내용("앞으로 주석은 한국어로")은 Copilot 이 `svnwt_rule_add` 로 저장합니다. 사이드바 *규칙* 에 목록과 추가 시각·작업 번호가 보이고, 추가/수정/삭제할 수 있습니다. 규칙은 사용자 지침 파일 `svnwt-rules.instructions.md` 로 모든 Copilot 채팅에 들어갑니다. Copilot 이 읽는 다른 지침 파일(`.github/copilot-instructions.md`, `AGENTS.md` 등)은 *규칙 → 다른 지침 파일* 에 나옵니다.
 
@@ -83,7 +88,7 @@ SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태�
 | `svnwt_task_attach_screenshots` | UI 테스트 스크린샷·동영상을 리뷰 화면에 첨부 (Playwright 출력 자동 수집) |
 | `svnwt_task_changelist` / `svnwt_task_unland` | 리뷰 대기 표시 / changelist 되돌리기 |
 | `svnwt_rule_add` / `svnwt_rule_list` | 앞으로 항상 지킬 규칙 저장 / 목록 |
-| `svnwt_task_remove` / `svnwt_path_map` | 작업 정리 / SVN 경로 ↔ worktree 경로 변환 |
+| `svnwt_task_remove` / `svnwt_path_map` | 작업 보관 (worktree 삭제, 커밋 기록 유지) / SVN 경로 ↔ worktree 경로 변환 |
 
 프롬프트: `/mcp.svnwt.start_task`, `/mcp.svnwt.review_task`, `/mcp.svnwt.finish_task`
 

@@ -1,4 +1,5 @@
 'use strict';
+require('./hide-windows');
 /**
  * Upgrade test: state created by an OLD svnwt (git ref, default the 0.3.0 commit) must keep working
  * with the CURRENT code.

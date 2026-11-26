@@ -1,4 +1,5 @@
 'use strict';
+require('../hide-windows');
 /**
  * Visual check of the "external commit" preparation: open TortoiseSVN's commit dialog on the whole
  * working copy (the way a user opens it from Explorer) and capture it.

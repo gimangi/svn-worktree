@@ -539,6 +539,12 @@ class Service {
 
   async _range(scope, task) {
     const git = await this.git(scope);
+    if (task.status === 'archived') {
+      // archived: the commits are kept under refs/svnwt/archive/<id> (0.4.7 and earlier deleted the branch)
+      const tip = task.archive && task.archive.ref ? await git.revParse(task.archive.ref) : null;
+      if (!tip) throw new Error(`#${task.no} 은 커밋 기록 없이 정리된 작업입니다 (0.4.7 이하 버전에서 정리).`);
+      return { git, tip, base: task.archive.base || (await git.mergeBase(BASE_REF, tip)) || task.baseCommit };
+    }
     const tip = await git.revParse('refs/heads/' + task.branch);
     if (!tip) throw new Error(`브랜치가 없습니다: ${task.branch}`);
     const base = (await git.mergeBase(BASE_REF, tip)) || task.baseCommit;
@@ -562,7 +568,7 @@ class Service {
 
   async taskInfo(ref, { checkSvn = true } = {}) {
     const { scope, task } = this.resolveTask(ref);
-    if (task.status === 'archived') return { task, scope: this._scopeSummary(scope) };
+    if (task.status === 'archived') return this._archivedInfo(scope, task);
     if (checkSvn && task.status === 'landed') await this._detectCommitted(scope, task);
     if (checkSvn && task.status === 'committed') await this._verifyCommitted(scope, task);
     const { git, tip, base } = await this._range(scope, task);
@@ -593,6 +599,122 @@ class Service {
     return res;
   }
 
+  /** History of an archived task: its kept commits, files, reviews (no worktree, no SVN state). */
+  async _archivedInfo(scope, task) {
+    const reviews = this.listReviews(task.id).map((r) => ({ at: r.at, reviewer: r.reviewer, verdict: r.verdict, summary: r.summary, comments: (r.comments || []).length }));
+    const res = { task, scope: this._scopeSummary(scope), archived: true, commits: [], files: [], reviews, history: false };
+    let range;
+    try { range = await this._range(scope, task); } catch (_) { return res; }
+    const { git, tip, base } = range;
+    const stats = await git.numstat(base, tip);
+    res.files = (await git.nameStatus(base, tip)).map((f) => Object.assign({}, f, stats[f.path] || {}));
+    res.commits = decode(await git.buf(['log', '--format=%H%x1f%an%x1f%aI%x1f%s', `${base}..${tip}`]))
+      .split('\n').filter(Boolean).map((l) => { const [sha, author, date, subject] = l.split('\x1f'); return { sha, author, date, subject }; });
+    return Object.assign(res, { tip, base, history: true });
+  }
+
+  /** Archived tasks, most recently archived first. */
+  listArchived({ scope: scopeRef } = {}) {
+    const scopes = scopeRef ? [this.resolveScope(scopeRef)] : this.listScopes();
+    const res = [];
+    for (const s of scopes) for (const t of this._listTaskFiles(s)) if (t.status === 'archived') res.push(Object.assign({ scope: s.id }, t));
+    return res.sort((a, b) => String(b.archivedAt || b.updatedAt || '').localeCompare(String(a.archivedAt || a.updatedAt || '')) || (b.no || 0) - (a.no || 0));
+  }
+
+  /** Delete an archived task for good: its kept commits, reviews, agent session, attachments. */
+  async purgeTask(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    if (task.status !== 'archived') throw new Error('보관된 작업만 기록을 삭제할 수 있습니다.');
+    const git = await this.git(scope);
+    if (task.archive && task.archive.ref) await git.raw(['update-ref', '-d', task.archive.ref]);
+    const dir = path.join(scope.home, 'tasks');
+    for (const n of fs.readdirSync(dir)) {
+      if (n === task.id + '.json' || n.startsWith(task.id + '.')) fs.rmSync(path.join(dir, n), { recursive: true, force: true });
+    }
+    store.touchEvents({ scope: scope.id, task: task.id });
+    return { task: task.id, purged: true };
+  }
+
+  // ------------------------------------------------------------ what is left in the SVN working copy (scope folder)
+  /**
+   * Local changes in the scope folder of the SVN working copy, e.g. what is left after a commit (set-aside edits
+   * put back, files left unchecked). `locked`: files of a task waiting for its SVN commit (taken back with
+   * "SVN 반영 되돌리기" instead).
+   */
+  async scopeChanges(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    const svn = await this.svn();
+    const tasks = this._listTaskFiles(scope);
+    const byCl = new Map(tasks.map((t) => [t.changelist, t]));
+    const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged', 'unversioned'];
+    // files and new folders of tasks waiting for their commit (folders cannot be in a changelist; shared files may be in another one)
+    const landedOwner = new Map();
+    for (const t of tasks.filter((x) => x.status === 'landed' && x.landed)) {
+      for (const p of [...(t.landed.files || []), ...(t.landed.dirs || [])]) if (!landedOwner.has(p.toLowerCase())) landedOwner.set(p.toLowerCase(), t);
+    }
+    const out = [];
+    for (const e of await svn.status(scope.svnPath)) {
+      if (!CHANGED.includes(e.item) && e.props !== 'modified') continue;
+      if (key(e.path) === key(scope.svnPath) && e.item !== 'modified' && e.props !== 'modified') continue;
+      const byList = e.changelist ? byCl.get(e.changelist) : null;
+      const owner = (byList && byList.status === 'landed' ? byList : null) || landedOwner.get(relPosix(scope.svnPath, e.path).toLowerCase()) || byList || null;
+      let isDir = false;
+      try { isDir = fs.statSync(e.path).isDirectory(); } catch (_) { /* missing / deleted */ }
+      out.push({
+        path: relPosix(scope.svnPath, e.path) || '.', abs: e.path, item: CHANGED.includes(e.item) ? e.item : 'modified', isDir,
+        changelist: e.changelist, task: owner ? { id: owner.id, no: owner.no, title: owner.title, status: owner.status } : null,
+        locked: !!(owner && owner.status === 'landed'),
+      });
+    }
+    // a folder holding a locked file is locked too (reverting it would take the file along)
+    for (const d of out.filter((c) => c.isDir && !c.locked)) {
+      const child = out.find((c) => c.locked && c.path.toLowerCase().startsWith(d.path.toLowerCase() + '/'));
+      if (child) { d.locked = true; d.task = child.task; }
+    }
+    return { scope: scope.id, svnPath: scope.svnPath, commitInProgress: !!this._commitMarker(scope), changes: out };
+  }
+
+  /**
+   * Throw away the given local changes in the scope folder (paths relative to it). Every file is copied to
+   * <scope home>/discarded/<time>/ first. Versioned changes are reverted, added and unversioned files deleted,
+   * changelist membership removed. Files of a task waiting for its commit are refused.
+   */
+  async discardScopeChanges(scopeRef, paths) {
+    const scope = this.resolveScope(scopeRef);
+    this._assertNoCommitInProgress(scope);
+    const svn = await this.svn();
+    return store.withLock(path.join(scope.home, 'lock'), async () => {
+      const all = (await this.scopeChanges(scope.id)).changes;
+      const want = new Set((paths || []).map((p) => String(p).replace(/\\/g, '/')));
+      const pick = all.filter((c) => want.has(c.path));
+      const locked = pick.filter((c) => c.locked);
+      if (locked.length) throw new Error(`커밋 대기 중인 작업의 파일입니다 (작업의 "SVN 반영 되돌리기" 사용): ${locked.map((c) => c.path).join(', ')}`);
+      if (!pick.length) return { scope: scope.id, discarded: [], backup: null };
+      const backup = store.ensureDir(path.join(scope.home, 'discarded', now().replace(/[:.]/g, '-')));
+      for (const c of pick) {
+        if (!fs.existsSync(c.abs)) continue;
+        const dst = fromPosix(path.join(backup, 'files'), c.path);
+        try { fs.cpSync(c.abs, dst, { recursive: true }); } catch (_) { /* best effort */ }
+      }
+      store.writeJson(path.join(backup, 'manifest.json'), { scope: scope.id, svnPath: scope.svnPath, at: now(), files: pick.map(({ abs, ...c }) => c) });
+      const versioned = pick.filter((c) => c.item !== 'unversioned');
+      if (versioned.length) await svn.withTargets(['revert', '--depth', 'infinity'], versioned.map((c) => c.abs), { okCodes: [1] });
+      for (const c of pick.filter((x) => x.item === 'unversioned' || x.item === 'added')) {
+        try { fs.rmSync(c.abs, { recursive: true, force: true }); } catch (_) { /* ignore */ }
+      }
+      const listed = pick.filter((c) => c.changelist && fs.existsSync(c.abs) && !c.isDir).map((c) => c.abs);
+      if (listed.length) await svn.withTargets(['changelist', '--remove'], listed, { okCodes: [1] });
+      // committed tasks whose leftovers were among them
+      for (const t of this._listTaskFiles(scope).filter((x) => x.status === 'committed' && (x.leftovers || []).length)) {
+        const left = t.leftovers.filter((p) => !want.has(p));
+        if (left.length !== t.leftovers.length) { t.leftovers = left; this._saveTask(scope, t); }
+      }
+      const rest = (await this.scopeChanges(scope.id)).changes.filter((c) => want.has(c.path));
+      store.touchEvents({ scope: scope.id });
+      return { scope: scope.id, discarded: pick.map((c) => c.path), failed: rest.map((c) => c.path), backup };
+    }, { op: `${scope.id}: SVN 남은 변경 버리기` });
+  }
+
   _scopeSummary(s) {
     return { id: s.id, svnPath: s.svnPath, url: s.url, revision: s.revision, mixedRevision: s.mixedRevision || null };
   }
@@ -612,6 +734,29 @@ class Service {
     const sha = await git.revParse('refs/heads/' + task.branch);
     this._saveTask(scope, task);
     return { committed: true, sha, summary: out.split('\n')[0] };
+  }
+
+  /**
+   * Where one file's changes start: [{ old, new }] (1-based line numbers on the SVN-base side / the task side),
+   * in file order. Compared like the diff editor shows it: base ↔ worktree file (archived: base ↔ kept tip).
+   */
+  async changeLines(ref, file, from = null) {
+    const { scope, task } = this.resolveTask(ref);
+    const { git, tip, base } = await this._range(scope, task);
+    const live = task.status !== 'archived' && fs.existsSync(task.workPath);
+    const args = ['diff', '--no-color', '-M', '-l0', '--no-ext-diff', '-U0', base];
+    if (!live) args.push(tip);
+    args.push('--', file);
+    if (from && from !== file) args.push(from);
+    const text = decode(await git.buf(args, live ? { cwd: task.workPath } : {}));
+    const out = [];
+    for (const l of text.split('\n')) {
+      const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(l);
+      if (!m) continue;
+      const [a, b, c, d] = [Number(m[1]), m[2] === undefined ? 1 : Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])];
+      out.push({ old: Math.max(1, b === 0 ? a + 1 : a), new: Math.max(1, d === 0 ? c + 1 : c) });
+    }
+    return out;
   }
 
   async diffTask(ref, { file = null, stat = false, maxChars = 60000, uncommitted = false } = {}) {
@@ -2022,13 +2167,34 @@ class Service {
   }
 
   // ------------------------------------------------------------ remove / reviews
-  async removeTask(ref, { force = false, keepBranch = false } = {}) {
+  /**
+   * Archive a task: the worktree folder and the branch go, the commits stay (refs/svnwt/archive/<id>) together with
+   * reviews and the agent session, viewable in "보관된 작업". Uncommitted worktree changes are committed first.
+   * keepHistory=false: nothing is kept (as 0.4.7 and earlier).
+   */
+  async removeTask(ref, { force = false, keepBranch = false, keepHistory = true } = {}) {
     const { scope, task } = this.resolveTask(ref);
+    if (task.status === 'archived') return { task: task.id, archived: true, warnings: [] };
     if (task.status === 'landed' && !force) {
       throw new Error(`SVN changelist(${task.changelist})가 아직 커밋되지 않았습니다. 커밋 후 정리하거나, svnwt_task_unland 로 되돌리거나, force=true 를 사용하세요.`);
     }
     const git = await this.git(scope);
     const warnings = [];
+    let archive = null;
+    if (keepHistory) {
+      try {
+        if (fs.existsSync(task.workPath)) {
+          const c = await this.commitTask(task.id, '보관 전 커밋되지 않은 변경').catch((e) => { warnings.push(`커밋되지 않은 변경을 보관하지 못했습니다: ${e.message}`); return null; });
+          if (c && c.committed) warnings.push('커밋되지 않은 worktree 변경을 커밋해서 같이 보관했습니다.');
+        }
+        const { tip, base } = await this._range(scope, task);
+        const aref = `refs/svnwt/archive/${task.id}`;
+        const r = await git.raw(['update-ref', aref, tip]);
+        if (r.code !== 0) throw new Error(decode(r.stderr).trim());
+        const n = decode(await git.buf(['rev-list', '--count', `${base}..${tip}`])).trim();
+        archive = { ref: aref, tip, base, commits: Number(n) || 0, files: (await git.nameStatus(base, tip)).length, statusBefore: task.status };
+      } catch (e) { warnings.push(`커밋 기록을 보관하지 못했습니다: ${e.message}`); }
+    }
     // 1) remove junctions/copies first so recursive deletes never reach the SVN working copy
     for (const l of task.links || []) {
       try {
@@ -2047,10 +2213,12 @@ class Service {
       } else warnings.push(`링크가 남아 있어 폴더를 지우지 않았습니다: ${task.worktree}`);
     }
     if (!keepBranch) await git.raw(['branch', '-D', task.branch]);
-    task.status = 'archived';
-    task.archivedAt = now();
-    this._saveTask(scope, task);
-    return { task: task.id, archived: true, warnings };
+    const fresh = this.resolveTask(task.id).task; // commitTask above may have saved it
+    fresh.status = 'archived';
+    fresh.archivedAt = now();
+    if (archive) fresh.archive = archive;
+    this._saveTask(scope, fresh);
+    return { task: task.id, archived: true, history: !!archive, warnings };
   }
 
   listReviews(ref) {

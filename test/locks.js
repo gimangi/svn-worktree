@@ -1,4 +1,5 @@
 'use strict';
+require('./hide-windows');
 /**
  * Lock / concurrency test: several agents creating tasks at the same time, long operations holding the
  * scope lock, and locks left behind by dead processes.

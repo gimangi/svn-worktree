@@ -1,4 +1,5 @@
 'use strict';
+require('../hide-windows');
 /**
  * UI test of the VS Code extension in an isolated VS Code instance driven over CDP, with screenshots.
  *   scripts\run-ui-test.cmd            -> docs\ui-test\report.html + shots\*.jpg
@@ -110,7 +111,7 @@ class Driver {
   }
 
   async key(key, { ctrl = false, shift = false, alt = false } = {}) {
-    const codes = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, F1: 112, Backspace: 8 };
+    const codes = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, F1: 112, F7: 118, Backspace: 8 };
     const modifiers = (alt ? 1 : 0) | (ctrl ? 2 : 0) | (shift ? 8 : 0);
     const kc = codes[key] || key.toUpperCase().charCodeAt(0);
     const base = { modifiers, key, code: key.length === 1 ? 'Key' + key.toUpperCase() : key, windowsVirtualKeyCode: kc, nativeVirtualKeyCode: kc };
@@ -260,11 +261,15 @@ function writeFakeModel() {
   return f;
 }
 
-function launch(folder) {
+async function launch(folder) {
   const env = { ...process.env, SVNWT_FAKE_LM: writeFakeModel() };
   delete env.ELECTRON_RUN_AS_NODE;
-  return spawn(CODE, [`--user-data-dir=${path.join(ROOT, 'ud')}`, `--extensions-dir=${path.join(ROOT, 'ext')}`, `--remote-debugging-port=${PORT}`,
-    '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--enable-proposed-api', 'svnwt.svn-worktree', '--new-window', folder], { env, detached: false, stdio: 'ignore' });
+  const args = [`--user-data-dir=${path.join(ROOT, 'ud')}`, `--extensions-dir=${path.join(ROOT, 'ext')}`, `--remote-debugging-port=${PORT}`,
+    '--disable-workspace-trust', '--skip-welcome', '--skip-release-notes', '--enable-proposed-api', 'svnwt.svn-worktree', '--new-window', folder];
+  if (process.env.SVNWT_UI_VISIBLE) return spawn(CODE, args, { env, detached: false, stdio: 'ignore' });
+  // default: on a separate desktop, so the test window never pops up or takes the user's focus
+  const { pid, holder } = await require("./hidden-desktop").startHidden(CODE, args, env);
+  return { pid, kill: () => { spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" }); try { holder.kill(); } catch (_) { /* ignore */ } } };
 }
 
 // ------------------------------------------------------------------ scenarios (test/ui/scenarios.js)
@@ -279,7 +284,7 @@ async function main() {
   killIsolated();
   console.log('setup...');
   const ctx = await setup();
-  const proc = launch(ctx.wc);
+  const proc = await launch(ctx.wc);
   const cdp = await Cdp.connect(PORT, (t) => /workbench/.test(t.url));
   const d = new Driver(cdp);
   try {

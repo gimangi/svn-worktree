@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -221,9 +221,9 @@
       },
       {
         "command": "svnwt.removeTask",
-        "title": "작업 삭제",
+        "title": "작업 보관 (worktree 정리, 커밋 기록 유지)",
         "category": "SVN Worktree",
-        "icon": "$(trash)"
+        "icon": "$(archive)"
       },
       {
         "command": "svnwt.checkEnvironment",
@@ -285,6 +285,66 @@
         "title": "커밋 준비 갱신 (새 커밋 반영)",
         "category": "SVN Worktree",
         "icon": "$(sync)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.purgeTask",
+        "title": "보관 기록 삭제",
+        "icon": "$(trash)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.showArchived",
+        "title": "보관된 작업 검색…",
+        "icon": "$(search)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.discardScopeChanges",
+        "title": "SVN 남은 변경 정리…",
+        "icon": "$(discard)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.prevFile",
+        "title": "이전 변경 파일",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.nextFile",
+        "title": "다음 변경 파일",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.backToReview",
+        "title": "리뷰 화면으로",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.diffToWindow",
+        "title": "diff 를 새 창으로 분리 (다음에도 새 창에)",
+        "icon": "$(multiple-windows)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.diffToReview",
+        "title": "diff 를 리뷰 화면 탭으로 (다음에도 리뷰 화면 위에)",
+        "icon": "$(screen-normal)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.nextChange",
+        "title": "다음 변경 (파일 끝에서는 다음 파일로)",
+        "icon": "$(arrow-small-down)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.prevChange",
+        "title": "이전 변경 (파일 처음에서는 이전 파일로)",
+        "icon": "$(arrow-small-up)"
       }
     ],
     "menus": {
@@ -473,18 +533,38 @@
         },
         {
           "command": "svnwt.openWorktree",
-          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(active|landed|committed)/",
           "group": "3@1"
         },
         {
           "command": "svnwt.removeTask",
-          "when": "view == svnwt.tasks && viewItem =~ /^task\\./",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.(active|landed|committed)/",
           "group": "9@1"
         },
         {
           "command": "svnwt.checkSvn",
           "when": "view == svnwt.tasks && viewItem =~ /^task\\.(landed|committed)/",
           "group": "2@9"
+        },
+        {
+          "command": "svnwt.discardScopeChanges",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "1@4"
+        },
+        {
+          "command": "svnwt.discardScopeChanges",
+          "when": "view == svnwt.tasks && viewItem =~ /^task\\.committed/",
+          "group": "2@6"
+        },
+        {
+          "command": "svnwt.showArchived",
+          "when": "view == svnwt.tasks && viewItem == archive",
+          "group": "inline@0"
+        },
+        {
+          "command": "svnwt.purgeTask",
+          "when": "view == svnwt.tasks && viewItem == task.archived",
+          "group": "9@1"
         }
       ],
       "explorer/context": [
@@ -534,6 +614,34 @@
         {
           "command": "svnwt.askAboutSelection",
           "when": "svnwt.inTask"
+        },
+        {
+          "command": "svnwt.prevFile",
+          "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.nextFile",
+          "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.backToReview",
+          "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.diffToWindow",
+          "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.diffToReview",
+          "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.nextChange",
+          "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.prevChange",
+          "when": "svnwt.diffNav"
         }
       ],
       "editor/context": [
@@ -547,6 +655,31 @@
         {
           "command": "svnwt.askAboutSelection",
           "when": "svnwt.inTask",
+          "group": "navigation@0"
+        },
+        {
+          "command": "svnwt.prevFile",
+          "when": "svnwt.diffNav",
+          "group": "navigation@-3"
+        },
+        {
+          "command": "svnwt.nextFile",
+          "when": "svnwt.diffNav",
+          "group": "navigation@-2"
+        },
+        {
+          "command": "svnwt.backToReview",
+          "when": "svnwt.diffNav",
+          "group": "navigation@-1"
+        },
+        {
+          "command": "svnwt.diffToWindow",
+          "when": "svnwt.diffNav && config.svnwt.diffPlacement != 'window'",
+          "group": "navigation@0"
+        },
+        {
+          "command": "svnwt.diffToReview",
+          "when": "svnwt.diffNav && config.svnwt.diffPlacement == 'window'",
           "group": "navigation@0"
         }
       ]
@@ -642,6 +775,21 @@
           ],
           "default": "chat",
           "description": "\"이 부분 질문/수정 지시\" 요청을 보낼 곳. 선택한 코드, 파일·줄 위치, 그 부분의 작업 diff 가 함께 들어갑니다."
+        },
+        "svnwt.diffPlacement": {
+          "type": "string",
+          "enum": [
+            "review",
+            "window",
+            "beside"
+          ],
+          "enumDescriptions": [
+            "리뷰 화면 위(같은 탭 그룹)에 전체 폭으로 엽니다 (양쪽 비교). 제목줄의 이전/다음 파일, 리뷰 화면 버튼으로 이동",
+            "diff 전용 새 창에 엽니다. 다음 파일도 그 창에서 바뀝니다",
+            "리뷰 화면 옆 칸에 엽니다 (좁으면 VS Code 가 한 줄 diff 로 바꿈)"
+          ],
+          "default": "review",
+          "description": "변경 파일을 눌렀을 때 diff 를 여는 위치. diff 제목줄의 \"새 창으로 분리\" / \"리뷰 화면 탭으로\" 버튼을 누르면 그 방식이 여기에 저장되어 다음에도 같은 방식으로 열립니다."
         }
       }
     },
@@ -674,6 +822,38 @@
         "name": "svnwt",
         "displayName": "SVN Worktree 작업",
         "description": "svnwt 작업별 에이전트 세션"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "svnwt.nextChange",
+        "key": "f7",
+        "when": "svnwt.diffNav"
+      },
+      {
+        "command": "svnwt.prevChange",
+        "key": "shift+f7",
+        "when": "svnwt.diffNav"
+      },
+      {
+        "command": "svnwt.nextFile",
+        "key": "alt+right",
+        "when": "svnwt.diffNav"
+      },
+      {
+        "command": "svnwt.prevFile",
+        "key": "alt+left",
+        "when": "svnwt.diffNav"
+      },
+      {
+        "command": "svnwt.backToReview",
+        "key": "escape",
+        "when": "svnwt.diffNav && editorTextFocus && !findWidgetVisible && !suggestWidgetVisible && !editorHasSelection && !editorHasMultipleSelections && !parameterHintsVisible && !renameInputVisible && !inSnippetMode && !inlineChatVisible && !inlineSuggestionVisible && !markersNavigationVisible && !codeActionMenuVisible && !isComposing"
+      },
+      {
+        "command": "svnwt.askAboutSelection",
+        "key": "alt+q",
+        "when": "svnwt.inTask && editorTextFocus"
       }
     ]
   },

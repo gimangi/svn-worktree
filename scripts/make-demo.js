@@ -1,4 +1,5 @@
 'use strict';
+try { require('../test/hide-windows'); } catch (_) { /* not in a test checkout */ }
 /**
  * Build a demo environment: local SVN repository + working copy + svnwt scope + one sample task.
  *   scripts\make-demo.cmd [targetDir]      (default: %USERPROFILE%\Desktop\svnwt-demo)

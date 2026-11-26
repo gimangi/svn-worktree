@@ -1,4 +1,5 @@
 'use strict';
+require('./hide-windows');
 /**
  * End-to-end test against a real local SVN repository (file://).
  *   set ELECTRON_RUN_AS_NODE=1 & "<Code.exe>" test\e2e.js      (or: node test\e2e.js)
@@ -648,6 +649,76 @@ async function main() {
   try { await s.removeTask(B.id); } catch (_) { threw = true; }
   assert(threw, 'removing a landed (uncommitted) task requires force');
   ok('remove task (junction-safe), landed task protected');
+
+  { // archive keeps the history: commits, files, per-commit view, diff; the branch is gone; listed under 보관된 작업
+    const sg = await s.git(scope);
+    assert(rmA.history, JSON.stringify(rmA));
+    assert(!(await sg.revParse('refs/heads/' + A.branch)), 'branch deleted');
+    assert(!s.listTasks().some((x) => x.id === A.id) && s.listArchived().some((x) => x.id === A.id));
+    const ai = await s.taskInfo(A.id);
+    assert(ai.archived && ai.history && ai.commits.length && ai.files.length, JSON.stringify(ai).slice(0, 400));
+    assert.strictEqual(s.resolveTask(A.id).task.archive.statusBefore, 'committed');
+    const c0 = await s.commitFiles(A.id, ai.commits[ai.commits.length - 1].sha);
+    assert(c0.files.length, JSON.stringify(c0));
+    assert((await s.diffTask(A.id)).diff.length > 0);
+    // where the changes start (F7 in the diff): archived = base ↔ kept tip, live = base ↔ worktree file
+    const clA = await s.changeLines(A.id, ai.files[0].path);
+    assert(clA.length && clA.every((h) => h.old >= 1 && h.new >= 1), JSON.stringify(clA));
+    const bi = await s.taskInfo(B.id, { checkSvn: false });
+    const bf = bi.files.find((f) => f.status === 'M') || bi.files[0];
+    const clB = await s.changeLines(B.id, bf.path, bf.from);
+    assert(clB.length && clB.map((h) => h.new).join() === clB.map((h) => h.new).sort((x, y) => x - y).join(), JSON.stringify(clB));
+    fs.appendFileSync(path.join(B.workPath, ...bf.path.split('/')), 'uncommitted tail\r\n');
+    const clB2 = await s.changeLines(B.id, bf.path, bf.from);
+    assert(clB2.length === clB.length + 1 || clB2[clB2.length - 1].new > clB[clB.length - 1].new, 'uncommitted worktree edit is a change too: ' + JSON.stringify(clB2));
+    await new (require('../src/core/git').Git)(t.git.path, null).exec(['checkout', '--', bf.path], { cwd: B.workPath });
+    // uncommitted worktree change is committed into the archive; purge deletes everything
+    const AX = await s.createTask(scope.id, { title: 'abandon me' });
+    fs.writeFileSync(path.join(AX.workPath, 'wip.txt'), 'wip\r\n');
+    const rmX = await s.removeTask(AX.id, { force: true });
+    assert(rmX.history && !fs.existsSync(AX.worktree), JSON.stringify(rmX));
+    const xi = await s.taskInfo(AX.id);
+    assert(xi.files.some((f) => f.path === 'wip.txt') && xi.commits.some((c) => /보관 전/.test(c.subject)), JSON.stringify(xi.files));
+    assert.strictEqual(s.listArchived()[0].id, AX.id, 'most recent first');
+    await s.purgeTask(AX.id);
+    assert(!s.listArchived().some((x) => x.id === AX.id) && !(await sg.revParse(`refs/svnwt/archive/${AX.id}`)));
+    assert(!fs.readdirSync(path.join(scope.home, 'tasks')).some((n) => n.startsWith(AX.id)));
+    // archived by an older version (no history): still opens
+    const AO = await s.createTask(scope.id, { title: 'old style' });
+    await s.removeTask(AO.id, { force: true, keepHistory: false });
+    const oi = await s.taskInfo(AO.id);
+    assert(oi.archived && !oi.history && !oi.commits.length);
+    ok('archive: worktree + branch removed, commits/files/per-commit diff kept; WIP kept; purge; pre-0.4.8 archived tasks open');
+  }
+
+  { // what is left in the scope folder after a commit: pick and throw away (copies kept); worktrees untouched
+    const vf = path.join(appDir, 'sp.txt');
+    const orig = R(vf);
+    fs.writeFileSync(vf, orig + 'LEFT\r\n');
+    W(path.join(appDir, 'left-added.txt'), 'added\r\n');
+    svn('add', '-q', path.join(appDir, 'left-added.txt'));
+    W(path.join(appDir, 'left-unver.txt'), 'unver\r\n');
+    const sc = await s.scopeChanges(scope.id);
+    const by = (p) => sc.changes.find((c) => c.path.endsWith(p));
+    assert(by('sp.txt') && by('sp.txt').item === 'modified' && by('left-added.txt').item === 'added' && by('left-unver.txt').item === 'unversioned', JSON.stringify(sc.changes));
+    const lockedOne = sc.changes.find((c) => c.locked && c.task.id === B.id);
+    assert(lockedOne, 'landed task files are locked: ' + JSON.stringify(sc.changes));
+    const newDir = sc.changes.find((c) => c.isDir && c.item === 'added' && sc.changes.some((x) => x.locked && x.path.startsWith(c.path + '/')));
+    assert(!newDir || newDir.locked, 'a new folder of a landed task is locked too: ' + JSON.stringify(newDir));
+    let refused = false;
+    try { await s.discardScopeChanges(scope.id, [lockedOne.path]); } catch (_) { refused = true; }
+    assert(refused, 'landed task file refused');
+    const bWork = fs.readdirSync(B.workPath).length;
+    const dr = await s.discardScopeChanges(scope.id, [by('sp.txt').path, by('left-added.txt').path]);
+    assert.strictEqual(R(vf), orig);
+    assert(!fs.existsSync(path.join(appDir, 'left-added.txt')) && fs.existsSync(path.join(appDir, 'left-unver.txt')));
+    assert(!dr.failed.length && fs.existsSync(path.join(dr.backup, 'manifest.json')), JSON.stringify(dr));
+    assert(R(path.join(dr.backup, 'files', ...by('sp.txt').path.split('/'))).endsWith('LEFT\r\n'), 'copy kept');
+    assert(!(await s.scopeChanges(scope.id)).changes.some((c) => /sp\.txt|left-added/.test(c.path)));
+    assert.strictEqual(fs.readdirSync(B.workPath).length, bWork, 'worktree untouched');
+    fs.unlinkSync(path.join(appDir, 'left-unver.txt'));
+    ok('SVN 남은 변경 정리: chosen changes reverted/deleted with copies, unversioned kept unless chosen, landed task protected');
+  }
 
   // ---------------------------------------------------------------- MCP server over stdio
   const res = await mcpRoundTrip([
