@@ -233,7 +233,7 @@ const TOOLS = [
         asking: 'The user is being asked. Call svnwt_test_wait again.',
         building: 'Applied, build still running. Call svnwt_test_wait again.',
         applied: r.build && !r.build.ok
-          ? 'Applied but the build failed (build.tail, build.logFile). Fix it in the worktree, commit, then svnwt_test_release this request and request again.'
+          ? (r.build.missing ? 'Applied, but svnwt could not work out how to build (' + r.build.missing + '). Find MSBuild (vswhere) and the .sln, save it with svnwt_local_build_set, build with svnwt_local_build_run, then test.' : 'Applied but the build failed (build.tail, build.logFile). If the build command is wrong fix it with svnwt_local_build_set and svnwt_local_build_run; if the code is wrong fix it in the worktree, commit, svnwt_test_release this request and request again.')
           : `Applied${r.build ? ' and built' : ''}. Test now against the local site (files are in ${r.svnPath}). Attach screenshots with svnwt_task_attach_screenshots, then call svnwt_test_release so the user gets their working copy back.`,
         rejected: 'The user said no. Tell them what you wanted to test; do not ask again unless they want it.',
         failed: 'Could not apply (reason). Usually: rebase the task (svnwt_task_sync) and request again.',
@@ -251,6 +251,18 @@ const TOOLS = [
       },
     },
     handler: (svc, a) => svc.testRelease(a.id, { result: a.result || null, summary: a.summary || '', by: 'agent' }),
+  },
+  {
+    name: 'svnwt_local_build_set',
+    description: 'Save how to build the SVN working copy of a scope after 로컬 반영 (run with cmd.exe in the scope folder), e.g. "\\"C:\\\\Program Files\\\\Microsoft Visual Studio\\\\18\\\\Professional\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe\\" ..\\\\App.sln -p:Configuration=Debug -m -v:m". Find MSBuild with vswhere and the .sln the user builds in Visual Studio. Empty string = never build; omit command to detect again.',
+    inputSchema: { type: 'object', required: ['scope'], properties: { scope: str('Scope id or path.'), command: str('Build command line.') } },
+    handler: (svc, a) => Object.assign(svc.setLocalBuild(a.scope, a.command === undefined ? null : a.command), { detected: a.command === undefined ? svc.detectLocalBuild(a.scope) : undefined }),
+  },
+  {
+    name: 'svnwt_local_build_run',
+    description: 'Build the SVN working copy of a scope with its saved (or detected) build command and return ok, exit code, the last output lines and the log file. Does not change source files.',
+    inputSchema: { type: 'object', required: ['scope'], properties: { scope: str('Scope id or path.') } },
+    handler: (svc, a) => svc.runLocalBuild(a.scope),
   },
   {
     name: 'svnwt_test_queue',

@@ -1239,17 +1239,24 @@ async function refreshPrepare(t) {
  * 커밋 준비 / changelist could not put some files on the working copy: say why per file. A rebase is offered only
  * when it can help (needsRebase) and not again right after one, so the dialog cannot come back for ever.
  */
-async function explainBlocked(t, r, { afterRebase = false } = {}) {
+async function explainBlocked(t, r, { afterRebase = false, what = '커밋 준비' } = {}) {
   const list = (r.blocked || []).map((b) => `✗ ${b.path}${b.reason ? ` — ${b.reason}` : ''}`).join('\n');
-  log(`#${t.no} 커밋 준비 불가${afterRebase ? ' (rebase 직후)' : ''}:\n${list}`);
+  log(`#${t.no} ${what} 불가${afterRebase ? ' (rebase 직후)' : ''}:\n${list}`);
   const canRebase = !!r.needsRebase && !afterRebase;
   const head = canRebase ? `#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다.`
-    : afterRebase ? `#${t.no}: 최신 SVN 기준으로 rebase 했지만 아직 커밋 준비를 할 수 없습니다.`
-      : `#${t.no}: working copy 에 올릴 수 없는 파일이 있어 커밋 준비를 하지 않았습니다.`;
-  const tail = canRebase ? '최신 SVN 기준으로 rebase 한 뒤 다시 커밋 준비합니다. working copy 는 바뀌지 않았습니다.'
-    : 'working copy 는 원래대로 두었습니다. 위 이유를 해결한 뒤 다시 커밋 준비하세요. 자세한 내용은 출력 패널(SVN Worktree)에 있습니다.';
-  const a = await vscode.window.showWarningMessage(head, { modal: true, detail: `${list}\n\n${tail}` }, ...(canRebase ? ['rebase 후 커밋 준비'] : []), '출력 보기');
-  if (a === 'rebase 후 커밋 준비') return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
+    : afterRebase ? `#${t.no}: 최신 SVN 기준으로 rebase 했지만 아직 ${what}을(를) 할 수 없습니다.`
+      : `#${t.no}: working copy 에 올릴 수 없는 파일이 있어 ${what}을(를) 하지 않았습니다.`;
+  const tail = canRebase ? `최신 SVN 기준으로 rebase 한 뒤 다시 ${what}합니다. working copy 는 바뀌지 않았습니다.`
+    : `working copy 는 원래대로 두었습니다. 위 이유를 해결한 뒤 다시 ${what}하세요. 자세한 내용은 출력 패널(SVN Worktree)에 있습니다.`;
+  const again = `rebase 후 ${what}`;
+  const a = await vscode.window.showWarningMessage(head, { modal: true, detail: `${list}\n\n${tail}` }, ...(canRebase ? [again] : []), '출력 보기');
+  if (a === again && what === '로컬 반영') {
+    const sr = await withProgress(`#${t.no} rebase 중…`, () => service.syncTask(t.id, { refresh: true }));
+    refreshAll();
+    if (!sr.ok) return resolveRebaseWithAgent(t, sr.conflicts);
+    return localApply.applyLocal(service.resolveTask(t.id).task);
+  }
+  if (a === again) return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
   if (a === '출력 보기') output.show(true);
   return undefined;
 }
@@ -1579,7 +1586,7 @@ async function activate(ctx) {
   watchEvents(ctx);
   svnWatch = createSvnWatch({ vscode, service, refreshAll, log });
   if (!process.env.SVNWT_NO_SVN_WATCH) svnWatch.start(ctx);
-  localApply = createLocalApply({ vscode, service, refreshAll, log, output, withCancel, withSteps, afterCommit, startCommitWatch: watchExternalCommit, explainBlocked });
+  localApply = createLocalApply({ vscode, service, refreshAll, log, output, withCancel, withSteps, afterCommit, startCommitWatch: watchExternalCommit, explainBlocked, openChat });
   localApply.start(ctx);
   statusBar(ctx);
 

@@ -1660,8 +1660,34 @@ class Service {
 
     const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
     const st = await svn.status(root);
+    // svn status lists an unversioned folder as one line, not the files in it. When the task adds files inside such
+    // a folder (e.g. left there by an earlier 커밋 준비/changelist, or copied by hand), every file of that folder is set
+    // aside too: otherwise they collide with the task ("양쪽에서 새로 추가됨"), and taking the task back out deletes
+    // the folder with the user's files in it.
+    {
+      const isDirSync = (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } };
+      const listed = new Set(st.map((e) => key(e.path)));
+      const holds = (e) => [...taskAbs].some((t) => t.startsWith(key(e.path) + path.sep));
+      let outside = st.filter((e) => e.item === 'unversioned' && isDirSync(e.path) && holds(e));
+      // a file the task adds that is on disk but not listed: inside an svn:ignore'd folder or itself ignored
+      const hidden = changes.filter((c) => /^[ARC]/.test(c.status)).map((c) => fromPosix(scope.svnPath, c.path))
+        .filter((p) => !listed.has(key(p)) && fs.existsSync(p) && !outside.some((d) => key(p).startsWith(key(d.path) + path.sep)));
+      if (hidden.length) {
+        const ign = (await svn.status(root, { noIgnore: true })).filter((e) => e.item === 'ignored' || e.item === 'unversioned');
+        for (const e of ign) {
+          if (isDirSync(e.path)) { if (hidden.some((p) => key(p).startsWith(key(e.path) + path.sep))) outside.push(e); } else if (hidden.some((p) => key(p) === key(e.path)) && !listed.has(key(e.path))) {
+            st.push({ path: e.path, item: 'unversioned', changelist: null, stray: true }); listed.add(key(e.path));
+          }
+        }
+      }
+      outside = outside.filter((d, i) => !outside.some((o, j) => j !== i && key(d.path).startsWith(key(o.path) + path.sep)));
+      const walk = (d, out) => { for (const ent of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, ent.name); if (ent.isDirectory()) walk(p, out); else if (ent.isFile()) out.push(p); } return out; };
+      for (const d of outside) {
+        for (const f of walk(d.path, [])) if (!listed.has(key(f))) { st.push({ path: f, item: 'unversioned', changelist: null, stray: true }); listed.add(key(f)); }
+      }
+    }
     const dir = store.ensureDir(path.join(scope.home, 'stash', `${now().replace(/[:.]/g, '-')}-${task.id}`));
-    const toSave = st.filter((e) => CHANGED.includes(e.item) || e.changelist || (e.item === 'unversioned' && taskAbs.has(key(e.path))));
+    const toSave = st.filter((e) => CHANGED.includes(e.item) || e.changelist || (e.item === 'unversioned' && (e.stray || taskAbs.has(key(e.path)))));
     step(`svn status ${st.length}개 항목, 빼 둘 변경/changelist ${toSave.length}개. 보관본 저장: ${dir}`);
     const entries = [];
     let n = 0;
@@ -1669,7 +1695,7 @@ class Service {
       for (const e of st) {
         if (cancelled()) break;
         const changed = CHANGED.includes(e.item);
-        const strayInTaskPath = e.item === 'unversioned' && taskAbs.has(key(e.path)); // would collide with a file the task adds
+        const strayInTaskPath = e.item === 'unversioned' && (e.stray || taskAbs.has(key(e.path))); // would collide with a file the task adds
         if (!changed && !e.changelist && !strayInTaskPath) continue;
         let isDir = false;
         try { isDir = fs.statSync(e.path).isDirectory(); } catch (_) { /* deleted */ }
@@ -2080,26 +2106,93 @@ class Service {
     const r = await this.applyTest(ref, { at, token });
     if (!r.ok || !build) return r;
     const { scope } = this.resolveTask(ref);
-    if (!(scope.localBuild || '').trim()) return Object.assign({}, r, { build: null });
-    this._step(`[로컬 반영 #${this.resolveTask(ref).task.no}] 빌드: ${scope.localBuild}`);
     const b = await this.runLocalBuild(scope.id, { token, onOutput });
     return Object.assign({}, r, { build: b });
   }
 
-  /** Command that builds the working copy after 로컬 반영 (run with cmd.exe in the scope folder). Empty: none. */
-  setLocalBuild(scopeRef, command) {
+  /**
+   * Command that builds the working copy after 로컬 반영 (run with cmd.exe in the scope folder). Set by an agent that
+   * worked out how to build (svnwt_local_build_set) or detected. '' = never build; null = detect again.
+   */
+  setLocalBuild(scopeRef, command, { auto = false } = {}) {
     const scope = this.resolveScope(scopeRef);
-    scope.localBuild = String(command || '').trim();
+    if (command === null || command === undefined) { delete scope.localBuild; delete scope.localBuildAuto; } else {
+      scope.localBuild = String(command).trim();
+      if (auto) scope.localBuildAuto = true; else delete scope.localBuildAuto;
+    }
     this._saveScope(scope);
     store.touchEvents({ scope: scope.id });
-    return { scope: scope.id, localBuild: scope.localBuild };
+    return { scope: scope.id, localBuild: scope.localBuild === undefined ? null : scope.localBuild, auto: !!scope.localBuildAuto };
   }
 
-  /** Run the scope's build command on the working copy; output goes to onOutput (lines) and a log file. */
+  /** MSBuild of the newest Visual Studio (or Build Tools): SVNWT_MSBUILD, vswhere, then the usual folders. */
+  _findMsbuild() {
+    if (process.env.SVNWT_MSBUILD) return fs.existsSync(process.env.SVNWT_MSBUILD) ? process.env.SVNWT_MSBUILD : null;
+    const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    const vswhere = path.join(pf86, 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+    if (fs.existsSync(vswhere)) {
+      try {
+        const out = require('child_process').execFileSync(vswhere, ['-latest', '-prerelease', '-products', '*', '-requires', 'Microsoft.Component.MSBuild', '-find', 'MSBuild\\**\\Bin\\MSBuild.exe'], { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+        const p = out.split(/\r?\n/).map((l) => l.trim()).find((l) => l && fs.existsSync(l) && !/\\(amd64|arm64)\\/i.test(l));
+        if (p) return p;
+      } catch (_) { /* fall through */ }
+    }
+    for (const base of [process.env.ProgramFiles || 'C:\\Program Files', pf86]) {
+      const vs = path.join(base, 'Microsoft Visual Studio');
+      let vers = [];
+      try { vers = fs.readdirSync(vs).sort().reverse(); } catch (_) { continue; }
+      for (const v of vers) {
+        let eds = [];
+        try { eds = fs.readdirSync(path.join(vs, v)); } catch (_) { continue; }
+        for (const e of eds) { const p = path.join(vs, v, e, 'MSBuild', 'Current', 'Bin', 'MSBuild.exe'); if (fs.existsSync(p)) return p; }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * How to build the scope's working copy without asking anybody: MSBuild + the nearest .sln (the scope folder and
+   * one level below, then the folders above it up to the working copy root), else a single project file.
+   */
+  detectLocalBuild(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    const msbuild = this._findMsbuild();
+    const list = (dir, re) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && re.test(e.name)).map((e) => path.join(dir, e.name)).sort(); } catch (_) { return []; } };
+    const subdirs = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory() && !/^(\.svn|\.git|bin|obj|node_modules|packages)$/i.test(e.name)).map((e) => path.join(dir, e.name)); } catch (_) { return []; } };
+    let found = [];
+    const look = (re) => {
+      let hit = list(scope.svnPath, re);
+      if (!hit.length) hit = subdirs(scope.svnPath).flatMap((d) => list(d, re));
+      for (let d = path.dirname(scope.svnPath); !hit.length && isInside(d, scope.wcRoot || scope.svnPath); d = path.dirname(d)) {
+        hit = list(d, re);
+        if (key(d) === key(scope.wcRoot || scope.svnPath) || path.dirname(d) === d) break;
+      }
+      return hit;
+    };
+    found = look(/\.sln$/i);
+    if (!found.length) { const p = look(/\.(cs|vb)proj$/i); if (p.length === 1) found = p; }
+    const target = found[0] || null;
+    const rel = target ? path.relative(scope.svnPath, target) : null;
+    const command = msbuild && target ? `"${msbuild}" "${rel}" -p:Configuration=Debug -m -v:m -nologo` : null;
+    const missing = !msbuild ? 'Visual Studio MSBuild 를 찾지 못했습니다' : !target ? '.sln / 프로젝트 파일을 찾지 못했습니다' : null;
+    return { scope: scope.id, msbuild, target: rel, candidates: found.map((f) => path.relative(scope.svnPath, f)), command, missing };
+  }
+
+  /**
+   * Run the scope's build command on the working copy; output goes to onOutput (lines) and a log file. No command
+   * yet: detected (and remembered). Nothing to run: { ok: false, missing: reason } (an agent can work it out).
+   */
   async runLocalBuild(scopeRef, { token, onOutput, timeoutMin = 30 } = {}) {
     const scope = this.resolveScope(scopeRef);
-    const command = (scope.localBuild || '').trim();
-    if (!command) return null;
+    if (typeof scope.localBuild !== 'string') {
+      const d = this.detectLocalBuild(scope.id);
+      if (!d.command) return { ok: false, missing: d.missing, detected: d, tail: [], code: null, ms: 0 };
+      this.setLocalBuild(scope.id, d.command, { auto: true });
+      this._step(`[로컬 빌드] 빌드 방법을 찾음: ${d.command}`);
+      return this.runLocalBuild(scope.id, { token, onOutput, timeoutMin });
+    }
+    const command = scope.localBuild.trim();
+    if (!command) return null; // chosen: no build
     const logFile = path.join(store.ensureDir(path.join(scope.home, 'builds')), `${now().replace(/[:.]/g, '-')}.log`);
     const t0 = Date.now();
     const { spawn, execFile } = require('child_process');
@@ -2271,7 +2364,7 @@ class Service {
       r = await this.applyTest(item.task, { at: item.sha, token });
       if (r.ok) {
         const { scope } = this.resolveTask(item.task);
-        if ((scope.localBuild || '').trim()) {
+        if (scope.localBuild !== '') {
           await this._testUpdate(id, { status: 'building', appliedAt: now(), files: r.files, setAside: r.setAside, svnPath: r.svnPath });
           r.build = await this.runLocalBuild(scope.id, { token, onOutput });
         }
@@ -2285,7 +2378,7 @@ class Service {
       await this._testUpdate(id, { status: 'failed', reason, needsRebase: !!r.needsRebase, endedAt: now() });
       return Object.assign({}, r, { item: id });
     }
-    const build = r.build ? { ok: r.build.ok, code: r.build.code, ms: r.build.ms, logFile: r.build.logFile, tail: r.build.tail.slice(-20) } : null;
+    const build = r.build ? { ok: r.build.ok, code: r.build.code, ms: r.build.ms, logFile: r.build.logFile || null, missing: r.build.missing || null, tail: (r.build.tail || []).slice(-20) } : null;
     await this._testUpdate(id, { status: 'applied', appliedAt: now(), files: r.files, setAside: r.setAside, svnPath: r.svnPath, build });
     return Object.assign({}, r, { item: id });
   }

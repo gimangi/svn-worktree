@@ -9,7 +9,7 @@
  */
 const path = require('path');
 
-function createLocalApply({ vscode, service, refreshAll, log, output, withCancel, withSteps, afterCommit, startCommitWatch, explainBlocked }) {
+function createLocalApply({ vscode, service, refreshAll, log, output, withCancel, withSteps, afterCommit, startCommitWatch, explainBlocked, openChat }) {
   let item = null;
   let timer = null;
   let busy = false;
@@ -28,7 +28,8 @@ function createLocalApply({ vscode, service, refreshAll, log, output, withCancel
   const buildOut = (line) => output.appendLine(`  │ ${line}`);
 
   /** Build command not chosen yet for the scope: ask once (empty answer = no build). */
-  async function ensureBuildChoice(t) {
+  async function ensureBuildChoice() { return true; } // the build is detected (MSBuild + .sln) or worked out by an agent
+  async function askBuildChoiceUnused(t) {
     const scope = service.resolveScope(t.scopeId);
     if (typeof scope.localBuild === 'string') return true;
     const a = await vscode.window.showInformationMessage(
@@ -73,7 +74,17 @@ function createLocalApply({ vscode, service, refreshAll, log, output, withCancel
 
   function showBuild(b) {
     if (!b) return '';
+    if (b.missing) return `, 빌드 못 함: ${b.missing}`;
     return b.ok ? `, 빌드 성공 (${(b.ms / 1000).toFixed(0)}초)` : `, 빌드 실패 (exit ${b.code})`;
+  }
+
+  /** The agent works out how to build the working copy, saves it (svnwt_local_build_set) and builds. */
+  function agentBuild(t, b) {
+    const scope = service.resolveScope(t.scopeId);
+    const why = b && b.missing ? b.missing : b ? `빌드 실패 (exit ${b.code}), 로그: ${b.logFile}` : '';
+    return openChat(`svnwt scope ${scope.id} 의 SVN working copy (${scope.svnPath}) 를 빌드하는 방법을 찾아줘. 지금 상태: ${why}. ` +
+      'Visual Studio MSBuild 위치(vswhere)와 빌드할 .sln 을 찾고, svnwt_local_build_set 으로 명령을 저장한 뒤 svnwt_local_build_run 으로 빌드해서 결과를 알려줘. ' +
+      '빌드 오류가 코드 문제면 working copy 를 고치지 말고 어떤 작업(worktree)에서 고쳐야 하는지 알려줘.', true);
   }
 
   /** "이 작업을 로컬에 반영" (the user's own: not asked again). Already applied at an older commit: re-apply. */
@@ -94,7 +105,7 @@ function createLocalApply({ vscode, service, refreshAll, log, output, withCancel
     } else if (!(await freeFor(t, st, '반영'))) return undefined;
     if (!(await ensureBuildChoice(t))) return undefined;
     const scope = service.resolveScope(t.scopeId);
-    if (scope.localBuild) { output.show(true); output.appendLine(`── #${t.no} 로컬 반영 후 빌드: ${scope.localBuild}`); }
+    if (scope.localBuild !== '') { output.show(true); output.appendLine(`── #${t.no} 로컬 반영 후 빌드${scope.localBuild ? `: ${scope.localBuild}` : ' (MSBuild·.sln 자동 찾기)'}`); }
     let r;
     try {
       const q = await service.testRequest(t.id, { by: 'user' });
@@ -104,7 +115,7 @@ function createLocalApply({ vscode, service, refreshAll, log, output, withCancel
       output.show(true);
       throw e;
     }
-    if (!r.ok) return explainBlocked(t, r);
+    if (!r.ok) return explainBlocked(t, r, { what: '로컬 반영' });
     reportApplied(t, r).catch((e) => log(`로컬 반영 알림: ${e.message}`)); // buttons answered later: do not hold the command
     return undefined;
   }
@@ -113,9 +124,11 @@ function createLocalApply({ vscode, service, refreshAll, log, output, withCancel
     const msg = `#${t.no} 을(를) 로컬에 반영했습니다 (파일 ${r.files.length}개${r.setAside ? `, 빼 둔 변경 ${r.setAside}개` : ''}${showBuild(r.build)}).` +
       (byAgent ? ' 에이전트가 테스트를 끝내면 되돌립니다.' : ' 확인한 뒤 커밋 준비하거나 되돌리세요.');
     const buttons = byAgent ? ['지금 되돌리기'] : ['커밋 준비', '되돌리기'];
-    if (r.build && !r.build.ok) buttons.unshift('빌드 로그');
+    if (r.build && !r.build.ok) buttons.unshift('에이전트에게 빌드 맡기기');
+    if (r.build && !r.build.ok && r.build.logFile) buttons.unshift('빌드 로그');
     const a = await (r.build && !r.build.ok ? vscode.window.showWarningMessage(msg, ...buttons) : vscode.window.showInformationMessage(msg, ...buttons));
     if (a === '빌드 로그') return vscode.commands.executeCommand('vscode.open', vscode.Uri.file(r.build.logFile));
+    if (a === '에이전트에게 빌드 맡기기') return agentBuild(t, r.build);
     if (a === '커밋 준비') return prepare(t);
     if (a === '되돌리기' || a === '지금 되돌리기') return endLocal(t);
     return undefined;
@@ -124,16 +137,15 @@ function createLocalApply({ vscode, service, refreshAll, log, output, withCancel
   async function rebuild(t) {
     const st = t ? stateOf(t) : states()[0];
     if (!st) { vscode.window.showInformationMessage('로컬에 반영된 작업이 없습니다.'); return undefined; }
-    const scope = service.resolveScope(st.scope);
-    if (!scope.localBuild && !(await setBuild(scope.id))) return undefined;
     const sc = service.resolveScope(st.scope);
-    if (!sc.localBuild) return undefined;
+    if (sc.localBuild === '') service.setLocalBuild(sc.id, null); // asked to build: detect again
     output.show(true);
-    output.appendLine(`── #${st.no} 다시 빌드: ${sc.localBuild}`);
+    output.appendLine(`── #${st.no} 다시 빌드${sc.localBuild ? `: ${sc.localBuild}` : ''}`);
     const b = await withCancel(`#${st.no} 빌드 중…`, (token) => service.runLocalBuild(sc.id, { token, onOutput: buildOut }));
     const a = await (b.ok ? vscode.window.showInformationMessage(`#${st.no} 빌드 성공 (${(b.ms / 1000).toFixed(0)}초)`)
-      : vscode.window.showWarningMessage(`#${st.no} 빌드 실패 (exit ${b.code})`, '빌드 로그'));
+      : vscode.window.showWarningMessage(`#${st.no} ${b.missing ? `빌드 못 함: ${b.missing}` : `빌드 실패 (exit ${b.code})`}`, ...(b.logFile ? ['빌드 로그'] : []), '에이전트에게 빌드 맡기기'));
     if (a === '빌드 로그') vscode.commands.executeCommand('vscode.open', vscode.Uri.file(b.logFile));
+    if (a === '에이전트에게 빌드 맡기기') agentBuild(service.resolveTask(st.task).task, b);
     return undefined;
   }
 
