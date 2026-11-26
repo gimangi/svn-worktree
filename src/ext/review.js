@@ -109,6 +109,7 @@ class ReviewPanel {
         case 'rebaseLand': return vscode.commands.executeCommand('svnwt.rebaseAndLand', this.taskId);
         case 'openTask': return vscode.commands.executeCommand('svnwt.openReview', m.task);
         case 'shortcuts': return vscode.commands.executeCommand('svnwt.showShortcuts');
+        case 'agentRebase': return vscode.commands.executeCommand('svnwt.resolveRebaseWithAgent', this.taskId);
         case 'refresh': return this.update();
         case 'checkSvn': return vscode.commands.executeCommand('svnwt.checkSvn', this.taskId);
         case 'openArtifact': return vscode.commands.executeCommand('vscode.open', vscode.Uri.file(m.file), { preview: true, viewColumn: vscode.ViewColumn.Beside });
@@ -184,7 +185,7 @@ class ReviewPanel {
     const t = info.task;
     const dirty = (info.worktree && info.worktree.dirty) || [];
     const notes = [];
-    if (info.worktree && (info.worktree.rebasing || info.worktree.merging)) notes.push(['warn', 'rebase 충돌을 해결하는 중입니다. worktree 에서 충돌을 정리한 뒤 다시 시도하세요.']);
+    if (info.worktree && (info.worktree.rebasing || info.worktree.merging)) notes.push(['warn', 'rebase 충돌을 정리하는 중입니다. 에이전트에게 맡기거나 worktree 에서 충돌을 정리한 뒤 다시 시도하세요.']);
     if (dirty.length && t.status !== 'committed') notes.push(['warn', `worktree 에 커밋되지 않은 변경 ${dirty.length}개가 있습니다. changelist 에는 커밋된 내용만 들어갑니다.`]);
     let title = '';
     let text = '';
@@ -247,6 +248,7 @@ class ReviewPanel {
       }
     }
     if (['landed', 'committed'].includes(t.status) && !(info.commitInProgress && info.commitInProgress.mine)) buttons.push(['checkSvn', 'SVN 상태 확인']);
+    if (info.worktree && (info.worktree.rebasing || info.worktree.merging)) buttons = [['agentRebase', '에이전트에게 맡기기', 'primary'], ...buttons.map(([c, l]) => [c, l])];
     const cmd = t.status === 'landed' && info.commit && !(info.commitInProgress && info.commitInProgress.mine)
       ? `<div class="sub"><a href="#" data-cmd="commitChoose">다른 방법으로 커밋…</a></div>` : '';
     return `<div class="next next-${esc(t.status)}"><div class="next-title">${esc(title)}</div><div class="next-text">${esc(text)}</div>

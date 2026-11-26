@@ -646,7 +646,11 @@ function registerCommands(ctx) {
     }
   });
 
-  reg('svnwt.openReview', async (arg, opts) => { const t = await pickTask(arg); ReviewPanel.show(ctxApi, t.id, opts || {}); });
+  reg('svnwt.openReview', async (arg, opts) => {
+    const t = await pickTask(arg);
+    if (arg && arg.kind === 'task') treeTaskId = t.id; // clicked in the tree: F2 renames this one
+    ReviewPanel.show(ctxApi, t.id, opts || {});
+  });
   reg('svnwt.openReviewNewTab', async (arg) => { const t = await pickTask(arg); ReviewPanel.show(ctxApi, t.id, { newTab: true }); });
 
   reg('svnwt.openWorktree', async (arg) => {
@@ -703,13 +707,15 @@ function registerCommands(ctx) {
     refreshAll();
     if (r.ok) vscode.window.showInformationMessage(`#${t.no}: 최신 SVN 기준(r${service.resolveScope(t.scopeId).revision})으로 갱신했습니다.`);
     else {
-      const a = await vscode.window.showWarningMessage(`#${t.no}: 충돌 ${r.conflicts.length}개 — ${r.conflicts.slice(0, 5).join(', ')}. worktree에서 해결한 뒤 계속하세요.`, 'Copilot에게 해결 요청', '취소(abort)');
+      const a = await vscode.window.showWarningMessage(`#${t.no}: 충돌 ${r.conflicts.length}개 — ${r.conflicts.slice(0, 5).join(', ')}. 에이전트에게 맡기거나 worktree에서 해결한 뒤 계속하세요.`, '에이전트에게 맡기기', 'Copilot에게 해결 요청', '취소(abort)');
+      if (a === '에이전트에게 맡기기') return resolveRebaseWithAgent(t, r.conflicts);
       if (a === '취소(abort)') { await service.syncTask(t.id, { abort: true }); refreshAll(); }
       if (a === 'Copilot에게 해결 요청') await openChat(`svnwt 작업 ${t.id} 의 rebase 충돌을 worktree(${t.workPath})에서 해결하고 svnwt_task_sync(cont=true)로 계속해줘. 충돌 파일: ${r.conflicts.join(', ')}`, true);
     }
   });
 
-  reg('svnwt.land', async (arg) => prepareCommit(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
+  reg('svnwt.land', async (arg, opts) => prepareCommit(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed'), opts || {}));
+  reg('svnwt.resolveRebaseWithAgent', async (arg) => resolveRebaseWithAgent(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
   reg('svnwt.landInPlace', async (arg) => {
     const t = await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed');
     const info = await service.taskInfo(t.id, { checkSvn: false });
@@ -787,14 +793,15 @@ function registerCommands(ctx) {
     const r = await withProgress(`#${t.no} 최신 SVN 기준으로 rebase 중…`, () => service.syncTask(t.id, {}));
     refreshAll();
     if (!r.ok) {
-      const a = await vscode.window.showWarningMessage(`#${t.no}: rebase 중 같은 줄 충돌 ${r.conflicts.length}개 — ${r.conflicts.slice(0, 5).join(', ')}. worktree 에서 정리한 뒤 다시 "changelist 만들기" 를 누르세요.`,
-        'Copilot에게 해결 요청', 'worktree 열기', '취소(abort)');
+      const a = await vscode.window.showWarningMessage(`#${t.no}: rebase 중 같은 줄 충돌 ${r.conflicts.length}개 — ${r.conflicts.slice(0, 5).join(', ')}. 에이전트에게 맡기거나 worktree 에서 정리한 뒤 다시 "커밋 준비" 를 누르세요.`,
+        '에이전트에게 맡기기', 'Copilot에게 해결 요청', '취소(abort)');
+      if (a === '에이전트에게 맡기기') return resolveRebaseWithAgent(t, r.conflicts);
       if (a === '취소(abort)') { await service.syncTask(t.id, { abort: true }); refreshAll(); }
       if (a === 'worktree 열기') vscode.commands.executeCommand('svnwt.openWorktree', t.id);
       if (a === 'Copilot에게 해결 요청') await openChat(`svnwt 작업 ${t.id} 의 rebase 충돌을 worktree(${t.workPath})에서 해결하고 svnwt_task_sync(cont=true)로 계속해줘. 충돌 파일: ${r.conflicts.join(', ')}`, true);
       return undefined;
     }
-    return vscode.commands.executeCommand('svnwt.land', t.id);
+    return vscode.commands.executeCommand('svnwt.land', t.id, { afterRebase: true });
   });
 
   reg('svnwt.unland', async (arg) => {
@@ -903,8 +910,9 @@ function registerCommands(ctx) {
   // F2 in the tree: the selected task (keybindings pass no argument)
   reg('svnwt.renameTask', async (arg) => {
     let id = taskIdOf(arg);
-    if (!id && taskView && taskView.selection.length) id = taskIdOf(taskView.selection[0]);
+    // the last task clicked or selected in the tree (TreeView.selection can lag behind or point to an old element)
     if (!id && treeTaskId) { try { service.resolveTask(treeTaskId); id = treeTaskId; } catch (_) { treeTaskId = null; } }
+    if (!id && taskView && taskView.selection.length) id = taskIdOf(taskView.selection[0]);
     const t = id ? service.resolveTask(id).task : await pickTask(null);
     const title = await vscode.window.showInputBox({ title: `#${t.no} 작업 이름 변경`, value: t.title, valueSelection: [0, t.title.length],
       prompt: 'SVN Worktree 목록과 리뷰 화면, 기본 SVN 커밋 메시지에 쓰입니다. 브랜치와 worktree 폴더 이름은 그대로입니다.',
@@ -1200,18 +1208,57 @@ async function refreshPrepare(t) {
     throw e;
   }
   if (r.committed) { vscode.window.showInformationMessage(`#${t.no} 은 이미 SVN 에 커밋됐습니다. 정리를 기다립니다.`); return undefined; }
-  if (!r.ok) {
-    const a = await vscode.window.showWarningMessage(`#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다. 커밋 준비는 되돌렸습니다.`, { modal: true, detail: (r.blocked || []).map((b) => `✗ ${b.path}`).join('\n') }, 'rebase 후 커밋 준비');
-    if (a) return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
-    return undefined;
-  }
+  if (!r.ok) return explainBlocked(t, r);
   try { await vscode.env.clipboard.writeText(fs.readFileSync(r.messageFile, 'utf8').trim()); } catch (_) { /* no message file */ }
   watchExternalCommit(t);
   vscode.window.showInformationMessage(`#${t.no} 커밋 준비 갱신: 새 커밋까지 반영했습니다 (파일 ${r.files.length}개). TortoiseSVN 커밋 창이 열려 있으면 새로 고침(F5) 하세요.`);
   return undefined;
 }
 
-async function prepareCommit(t) {
+/**
+ * 커밋 준비 / changelist could not put some files on the working copy: say why per file. A rebase is offered only
+ * when it can help (needsRebase) and not again right after one, so the dialog cannot come back for ever.
+ */
+async function explainBlocked(t, r, { afterRebase = false } = {}) {
+  const list = (r.blocked || []).map((b) => `✗ ${b.path}${b.reason ? ` — ${b.reason}` : ''}`).join('\n');
+  log(`#${t.no} 커밋 준비 불가${afterRebase ? ' (rebase 직후)' : ''}:\n${list}`);
+  const canRebase = !!r.needsRebase && !afterRebase;
+  const head = canRebase ? `#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다.`
+    : afterRebase ? `#${t.no}: 최신 SVN 기준으로 rebase 했지만 아직 커밋 준비를 할 수 없습니다.`
+      : `#${t.no}: working copy 에 올릴 수 없는 파일이 있어 커밋 준비를 하지 않았습니다.`;
+  const tail = canRebase ? '최신 SVN 기준으로 rebase 한 뒤 다시 커밋 준비합니다. working copy 는 바뀌지 않았습니다.'
+    : 'working copy 는 원래대로 두었습니다. 위 이유를 해결한 뒤 다시 커밋 준비하세요. 자세한 내용은 출력 패널(SVN Worktree)에 있습니다.';
+  const a = await vscode.window.showWarningMessage(head, { modal: true, detail: `${list}\n\n${tail}` }, ...(canRebase ? ['rebase 후 커밋 준비'] : []), '출력 보기');
+  if (a === 'rebase 후 커밋 준비') return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
+  if (a === '출력 보기') output.show(true);
+  return undefined;
+}
+
+/** Rebase conflict left in the worktree: the built-in agent resolves it and continues the rebase. */
+const AGENT_REBASE_PROMPT = (files) => [
+  '최신 SVN 기준으로 rebase 하다가 충돌이 났습니다. rebase 는 진행 중인 상태로 멈춰 있습니다.',
+  `충돌 파일: ${files.join(', ')}`,
+  '1. 각 파일의 충돌 표시(<<<<<<< ======= >>>>>>>)를 정리하세요. SVN 쪽(HEAD) 변경은 다른 사람이 커밋한 내용이니 살리고, 이 작업의 변경을 그 위에 다시 적용합니다.',
+  '2. 빌드나 테스트가 있으면 run_command 로 확인하세요.',
+  '3. sync_svn 을 cont=true 로 호출해 rebase 를 이어가세요. 다음 커밋에서 또 충돌하면 같은 방법으로 반복합니다.',
+  'git_commit 은 쓰지 마세요 (rebase 가 커밋합니다). 어느 쪽을 살려야 할지 판단하기 어려운 충돌은 sync_svn(abort=true) 로 되돌리고 이유를 알려 주세요.',
+].join('\n');
+async function resolveRebaseWithAgent(t, conflicts) {
+  let files = conflicts;
+  if (!files) {
+    const info = await service.taskInfo(t.id, { checkSvn: false });
+    if (info.worktree && (info.worktree.rebasing || info.worktree.merging)) files = await service.conflictFiles(t.id);
+  }
+  if (!files) {
+    const r = await withProgress(`#${t.no} rebase 중…`, () => service.syncTask(t.id, { refresh: false }));
+    refreshAll();
+    if (r.ok) { vscode.window.setStatusBarMessage(`#${t.no}: 충돌 없이 rebase 했습니다`, 5000); return undefined; }
+    files = r.conflicts;
+  }
+  return vscode.commands.executeCommand('svnwt.agent.instruct', t.id, AGENT_REBASE_PROMPT(files));
+}
+
+async function prepareCommit(t, opts = {}) {
   if (!t) return undefined;
   if (service.pendingCommits().some((m) => m.task === t.id && m.kind === 'stash' && m.phase === 'ready')) {
     if (await service.prepareIsStale(t.id)) return refreshPrepare(t);
@@ -1231,14 +1278,7 @@ async function prepareCommit(t) {
     output.show(true);
     throw e;
   }
-  if (!r.ok) {
-    const a = await vscode.window.showWarningMessage(`#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다.`, {
-      modal: true,
-      detail: `${(r.blocked || []).map((b) => `✗ ${b.path}`).join('\n')}\n\n최신 SVN 기준으로 rebase 한 뒤 다시 커밋 준비합니다. working copy 는 바뀌지 않았습니다.`,
-    }, 'rebase 후 커밋 준비');
-    if (a) return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
-    return undefined;
-  }
+  if (!r.ok) return explainBlocked(t, r, opts);
   try { await vscode.env.clipboard.writeText(fs.readFileSync(r.messageFile, 'utf8').trim()); } catch (_) { /* no message file */ }
   watchExternalCommit(t);
   vscode.window.showInformationMessage(

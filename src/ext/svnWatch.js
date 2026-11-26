@@ -62,9 +62,10 @@ function createSvnWatch({ vscode, service, refreshAll, log }) {
       const c = conflicted[0];
       const a = await vscode.window.showWarningMessage(
         `${conflicted.map((t) => `#${t.no} "${t.title}"`).join(', ')}: SVN 에 새로 들어온 내용과 같은 줄을 고쳐서 rebase 하지 않았습니다 (작업은 그대로). 충돌 파일: ${[...new Set(conflicted.flatMap((t) => t.files))].slice(0, 5).join(', ')}`,
-        conflicted.length === 1 ? '충돌 해결하기' : `#${c.no} 충돌 해결하기`, '리뷰 열기');
+        conflicted.length === 1 ? '에이전트에게 맡기기' : `#${c.no} 에이전트에게 맡기기`, '직접 해결하기', '리뷰 열기');
       if (a === '리뷰 열기') vscode.commands.executeCommand('svnwt.openReview', c.id);
-      else if (a) vscode.commands.executeCommand('svnwt.syncTask', c.id);
+      else if (a === '직접 해결하기') vscode.commands.executeCommand('svnwt.syncTask', c.id);
+      else if (a) vscode.commands.executeCommand('svnwt.resolveRebaseWithAgent', c.id);
     }
   }
 

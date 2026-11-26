@@ -805,33 +805,134 @@ class Service {
       return { aborted: true };
     }
     if (cont) {
-      await git.exec(['add', '-A'], { cwd });
-      const r = wt.rebasing
-        ? await git.raw(['-c', 'core.editor=true', 'rebase', '--continue'], { cwd })
-        : await git.raw(['commit', '--no-edit'], { cwd });
-      return this._syncResult(scope, task, git, r);
+      let r;
+      for (let attempt = 0; ; attempt++) {
+        const add = await git.raw(['add', '-A'], { cwd });
+        r = add.code !== 0 ? add : wt.rebasing
+          ? await git.raw(['-c', 'core.editor=true', 'rebase', '--continue'], { cwd })
+          : await git.raw(['commit', '--no-edit'], { cwd });
+        const text = decode(r.stdout) + decode(r.stderr);
+        // the fix made this commit empty (same as the SVN side): skip it, as `git rebase --skip` would
+        if (r.code !== 0 && wt.rebasing && /No changes|nothing to commit|nothing added to commit/i.test(text)) {
+          r = await git.raw(['-c', 'core.editor=true', 'rebase', '--skip'], { cwd });
+        }
+        if (r.code === 0 || attempt >= 4 || !/index\.lock/.test(decode(r.stdout) + decode(r.stderr))) break;
+        await new Promise((res) => setTimeout(res, 600 * (attempt + 1)));
+      }
+      // keep a rebase that the user / agent is resolving: never undo it here
+      return this._syncResult(scope, task, git, r, { keep: true });
     }
     if (wt.rebasing || wt.merging) throw new Error('이전 sync 가 진행 중입니다. 충돌을 해결한 뒤 cont=true 로 계속하거나 abort=true 로 취소하세요.');
     if (wt.dirty.length) throw new Error(`worktree 에 커밋되지 않은 변경이 있습니다 (${wt.dirty.length}개). 먼저 svnwt_task_commit 을 호출하세요.`);
+    // rebasing another branch (or a detached HEAD) would leave the task branch where it was: behind for ever
+    if (wt.head !== task.branch) {
+      throw new Error(`worktree 가 작업 브랜치(${task.branch})가 아니라 ${wt.head ? `"${wt.head}" 브랜치` : '특정 커밋(detached HEAD)'}에 있어 rebase 하지 않았습니다. worktree 에서 git switch ${task.branch} 로 돌아간 뒤 다시 하세요.`);
+    }
     let snap = null;
     if (refresh || svnUpdate) snap = await this.refreshScope(scope.id, { svnUpdate });
-    const r = strategy === 'merge'
-      ? await git.raw(['merge', '--no-edit', BASE_REF], { cwd })
-      : await git.raw(['rebase', BASE_REF], { cwd });
+    const text = (x) => decode(x.stdout) + decode(x.stderr);
+    if (strategy !== 'merge') {
+      // clean rebase without the worktree (see _rebaseObjects); the worktree is touched once at the end
+      let o = null;
+      try { o = await this._rebaseObjects(git, task); } catch (e) { this._step(`#${task.no} merge-tree rebase 생략: ${e.message}`); }
+      if (o && o.tip) {
+        if (!o.noop) {
+          let mv;
+          for (let attempt = 0; ; attempt++) {
+            mv = await git.raw(['reset', '-q', '--keep', o.tip], { cwd });
+            if (mv.code === 0 || attempt >= 5 || !/index\.lock/.test(text(mv))) break;
+            await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
+          }
+          if (mv.code !== 0) throw new Error(`rebase 결과를 worktree 에 반영하지 못했습니다 (작업은 그대로): ${text(mv).trim().split(/\r?\n/).slice(0, 3).join(' / ')}`);
+        }
+        const res = await this._syncResult(scope, task, git, { code: 0, stdout: Buffer.from(o.noop ? '이미 최신 기준' : `rebase: 커밋 ${o.count}개를 새 기준 위로`), stderr: Buffer.alloc(0) });
+        res.snapshot = snap;
+        return res;
+      }
+      // a commit does not apply cleanly (or this git is too old): git rebase in the worktree leaves the conflict there
+    }
+    // another git in the same worktree (VS Code's own Git extension refreshing it, it is in the workspace) holds
+    // index.lock for a moment: undo and try again instead of failing (0.5.0 showed that as a 0-file conflict)
+    let r;
+    for (let attempt = 0; ; attempt++) {
+      r = strategy === 'merge'
+        ? await git.raw(['merge', '--no-edit', BASE_REF], { cwd })
+        : await git.raw(['rebase', BASE_REF], { cwd });
+      if (r.code === 0 || attempt >= 4 || !/index\.lock/.test(decode(r.stdout) + decode(r.stderr))) break;
+      const st = await this._worktreeState(scope, task);
+      if (st.rebasing) await git.raw(['rebase', '--abort'], { cwd });
+      if (st.merging) await git.raw(['merge', '--abort'], { cwd });
+      this._step(`#${task.no} rebase: 다른 git 이 index.lock 을 쓰는 중, 다시 시도 (${attempt + 1})`);
+      await new Promise((res) => setTimeout(res, 600 * (attempt + 1)));
+    }
     const res = await this._syncResult(scope, task, git, r);
     res.snapshot = snap;
     return res;
   }
 
-  async _syncResult(scope, task, git, r) {
+  /**
+   * Rebase the task branch onto the SVN base with objects only: every task commit is merged onto the new base
+   * with `git merge-tree` and recorded with `commit-tree` (author, date and message kept). Nothing touches the
+   * worktree, so another git using it meanwhile (VS Code's Git extension: worktrees are in the workspace) cannot
+   * break the rebase between two commits. Returns {tip, count} (noop when already on the base), {conflict: true}
+   * when a commit does not apply cleanly, or null when this git cannot do it (merge-tree --merge-base: git 2.40+).
+   */
+  async _rebaseObjects(git, task) {
+    const tip = await git.revParse('refs/heads/' + task.branch);
+    const onto = await git.revParse(BASE_REF);
+    const mb = tip && onto ? await git.mergeBase(onto, tip) : null;
+    if (!mb) return null;
+    if (mb === onto) return { tip, noop: true, count: 0 };
+    const list = decode(await git.buf(['rev-list', '--reverse', '--parents', `${mb}..${tip}`])).split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => l.split(' '));
+    if (list.some((p) => p.length !== 2)) return null; // merge commits: leave them to git rebase
+    let cur = onto;
+    let count = 0;
+    for (const [c, parent] of list) {
+      const m = await git.raw(['merge-tree', '--write-tree', '--no-messages', `--merge-base=${parent}`, cur, c]);
+      if (m.code === 1) return { conflict: true };
+      if (m.code !== 0) return null;
+      const tree = decode(m.stdout).trim().split(/\r?\n/)[0];
+      if (!/^[0-9a-f]{40,64}$/.test(tree)) return null;
+      if (tree === (await git.treeOf(cur))) continue; // already in SVN: dropped, as git rebase does
+      const [name, email, date, ...msg] = decode(await git.buf(['log', '-1', '--format=%an%x00%ae%x00%aI%x00%B', c])).split('\0');
+      cur = (await git.exec(['commit-tree', tree, '-p', cur, '-F', '-'], { input: msg.join('\0'), env: { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_AUTHOR_DATE: date } })).trim();
+      count++;
+    }
+    return { tip: cur, count };
+  }
+
+  /** Files left in conflict by a rebase / merge in the task worktree. */
+  async conflictFiles(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const git = await this.git(scope);
+    return decode((await git.raw(['diff', '--name-only', '--diff-filter=U'], { cwd: task.workPath })).stdout).split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  }
+
+  async _syncResult(scope, task, git, r, { keep = false } = {}) {
     const out = (decode(r.stdout) + decode(r.stderr)).trim();
+    this._step(`#${task.no} rebase (exit ${r.code}): ${out.split(/\r?\n/).slice(-6).join(' / ')}`);
     if (r.code === 0) {
+      // the task branch must now contain the SVN base; otherwise asking again would never end
+      const behind = Number(decode(await git.buf(['rev-list', '--count', `refs/heads/${task.branch}..${BASE_REF}`])).trim()) || 0;
+      if (behind) throw new Error(`rebase 는 끝났지만 작업 브랜치 ${task.branch} 가 아직 SVN 기준보다 ${behind}커밋 뒤에 있습니다. 출력 패널(SVN Worktree)의 rebase 로그를 확인하세요.`);
       task.baseCommit = await git.revParse(BASE_REF);
       task.baseRevision = this.resolveScope(scope.id).revision;
       this._saveTask(scope, task);
       return { ok: true, output: out.slice(-2000) };
     }
     const conflicts = decode((await git.raw(['diff', '--name-only', '--diff-filter=U'], { cwd: task.workPath })).stdout).split('\n').filter(Boolean);
+    if (!conflicts.length) {
+      // not a conflict (files in the way, a lock file, ...): say why instead of "충돌 0개"; a new rebase is undone,
+      // one being resolved (cont) is kept so the fixes are not lost
+      if (!keep) {
+        const st = await this._worktreeState(scope, task);
+        if (st.rebasing) await git.raw(['rebase', '--abort'], { cwd: task.workPath });
+        if (st.merging) await git.raw(['merge', '--abort'], { cwd: task.workPath });
+      }
+      const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const why = lines.filter((l) => /error|fatal|overwritten|cannot|unable|lock/i.test(l)).slice(0, 4).join(' / ') || lines.slice(-3).join(' / ');
+      throw new Error(keep ? `rebase 를 계속하지 못했습니다 (충돌 정리 중인 상태는 그대로): ${why}` : `rebase 하지 못했습니다 (충돌 아님): ${why}`);
+    }
     return {
       ok: false, conflicts, output: out.slice(-2000),
       next: `충돌 파일을 ${task.workPath} 에서 수정한 뒤 svnwt_task_sync(cont=true) 를 호출하세요. 취소하려면 abort=true.`,

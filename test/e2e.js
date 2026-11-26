@@ -786,6 +786,37 @@ async function main() {
     const landed = s.listTasks({ scope: scope.id }).find((x) => x.status === 'landed' || x.status === 'committed');
     if (landed) assert.strictEqual(s.renameTask(landed.id, landed.title + ' (이름 변경)').changelist, landed.changelist, 'changelist in the working copy keeps its name');
     ok(`rename task: title, changelist ${r1.changelist}${landed ? `; ${landed.status} task keeps its changelist` : ''}`);
+
+    // rebase that cannot help must not look like success or like a conflict (0.5.0: "rebase" asked again for ever)
+    W(path.join(other, 'theirs2.txt'), 'theirs 2\n');
+    svn('add', path.join(other, 'theirs2.txt'));
+    svn('commit', '-m', 'their second commit', other);
+    svn('update', appDir);
+    await s.refreshScope(scope.id);
+    const git = (...a) => execFileSync(t.git.path, a, { cwd: C.workPath, encoding: 'utf8' });
+    git('checkout', '-q', '--detach');
+    await assert.rejects(s.syncTask(C.id, { refresh: false }), /작업 브랜치.*detached/);
+    git('checkout', '-q', C.branch);
+    const gitDir = path.resolve(C.workPath, git('rev-parse', '--git-dir').trim());
+    fs.writeFileSync(path.join(gitDir, 'index.lock'), '');
+    await assert.rejects(s.syncTask(C.id, { refresh: false }), /index.lock/);
+    fs.rmSync(path.join(gitDir, 'index.lock'));
+    assert(!(await s.taskInfo(C.id, { checkSvn: false })).worktree.rebasing, 'nothing left half done');
+    assert((await s.syncTask(C.id, { refresh: false })).ok && fs.existsSync(path.join(C.workPath, 'theirs2.txt')));
+    // a real conflict stays for the agent: conflict files listed, cont after fixing finishes the rebase
+    W(path.join(C.workPath, 'theirs2.txt'), 'mine 2\n');
+    await s.commitTask(C.id, 'edit theirs2');
+    W(path.join(other, 'theirs2.txt'), 'theirs 2 changed\n');
+    svn('commit', '-m', 'their third commit', other);
+    svn('update', appDir);
+    await s.refreshScope(scope.id);
+    const cf = await s.syncTask(C.id, { refresh: false });
+    assert(!cf.ok && cf.conflicts.includes('theirs2.txt'), JSON.stringify(cf));
+    assert.deepStrictEqual(await s.conflictFiles(C.id), ['theirs2.txt']);
+    W(path.join(C.workPath, 'theirs2.txt'), 'theirs 2 changed + mine\n');
+    assert((await s.syncTask(C.id, { cont: true })).ok, 'cont after the fix');
+    assert(!(await s.tasksBehind(scope.id)).some((x) => x.id === C.id));
+    ok('rebase: detached HEAD refused, non-conflict failure (index.lock) undone with its reason, conflict -> fix -> cont');
   }
 
   console.log(`\n# all ${step} checks passed`);

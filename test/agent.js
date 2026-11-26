@@ -162,6 +162,24 @@ async function main() {
   assert(systemPrompt(scope, task, s.listRules()).includes('- 앞으로 주석은 한국어로 쓴다'));
   ok('rule tool: explicit saved, general feedback only proposed, duplicates skipped, rules in the prompt');
 
+  // rebase conflict handed to the agent: it fixes the file and continues the rebase with sync_svn(cont)
+  fs.writeFileSync(path.join(wc, 'app', 'main.cpp'), 'int main() {\r\n  return 2;\r\n}\r\n');
+  svn('commit', '-q', '-m', 'someone returns 2', wc);
+  await s.refreshScope(scope.id);
+  const cf = await s.syncTask(task.id, { refresh: false });
+  assert(!cf.ok && cf.conflicts.includes('main.cpp'), JSON.stringify(cf));
+  const m3 = scriptedModel([
+    { calls: [['read_file', { path: 'main.cpp' }], ['write_file', { path: 'main.cpp', content: 'int main() {\r\n  return 3;\r\n}\r\n' }], ['sync_svn', { cont: true }]] },
+    { text: '충돌을 정리하고 rebase 를 마쳤습니다.' },
+  ]);
+  await runner2.run({ taskId: task.id, prompt: '최신 SVN 기준으로 rebase 하다가 충돌이 났습니다. 충돌 파일: main.cpp', model: m3 });
+  assert(/<<<<<<<|>>>>>>>/.test(m3.seen[0]), 'agent saw the conflict markers');
+  assert(/"ok": true/.test(m3.seen[2]), m3.seen[2]);
+  const info = await s.taskInfo(task.id, { checkSvn: false });
+  assert(!info.worktree.rebasing && info.baseIsLatest, JSON.stringify(info.worktree));
+  assert.strictEqual(fs.readFileSync(path.join(task.workPath, 'main.cpp'), 'utf8'), 'int main() {\r\n  return 3;\r\n}\r\n');
+  ok('rebase conflict resolved by the agent (write_file + sync_svn cont)');
+
   console.log(`\n# all ${n} agent checks passed`);
   try { execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Remove-Item -LiteralPath $env:T -Recurse -Force'], { env: { ...process.env, T: ROOT }, stdio: 'ignore' }); } catch (_) { /* ignore */ }
 }
