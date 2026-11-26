@@ -146,6 +146,13 @@ async function scenarios(d, ctx) {
     assert(btns.length >= 4, JSON.stringify(btns));
     return { note: `탭 그룹: ${g.tabs.join(' | ')} · 버튼: ${btns.join(', ')}` };
   });
+  await step({ scenario: S2, action: 'diff 제목줄 버튼 툴팁', expect: '이전/다음 변경 · 이전/다음 파일 · 리뷰 화면 버튼에 단축키가 함께 표시됨 (F7, Shift+F7, Alt+←/→)' }, async () => {
+    const labels = await d.eval(`[...document.querySelectorAll('.editor-group-container .editor-actions .action-label')].map((a) => a.getAttribute('aria-label') || a.getAttribute('title') || '').filter(Boolean)`);
+    const find = (re) => labels.find((x) => re.test(x)) || '';
+    const want = [[/^다음 변경 \(/, /\(F7\)$/], [/^이전 변경 \(/, /\(Shift\+F7\)$/], [/^다음 변경 파일/, /\(Alt\+/], [/^이전 변경 파일/, /\(Alt\+/]];
+    for (const [name, key] of want) assert(key.test(find(name)), `no key in tooltip ${name}: ${JSON.stringify(labels)}`);
+    return { note: labels.filter((x) => /변경|리뷰 화면/.test(x)).join(' · ') };
+  });
   await step({ scenario: S2, action: 'F7 → F7 → Shift+F7', expect: '첫 변경으로, 파일 끝에서는 다음 파일의 첫 변경으로, 거꾸로는 이전 파일의 마지막 변경으로' }, async () => {
     await d.key('F7');
     await sleep(500);
@@ -166,11 +173,26 @@ async function scenarios(d, ctx) {
   await step({ scenario: S2, action: 'Alt+→ (다음 파일) → Esc', expect: '같은 탭에서 다음 파일 diff, Esc 로 리뷰 화면' }, async () => {
     await d.key('ArrowRight', { alt: true });
     const g = await activeDiff(/2\/3/);
+    // Esc goes back only from a focused diff (editorTextFocus): wait until the new diff has the focus
+    for (let i = 0; i < 20 && !(await d.eval(`!!(document.activeElement && document.activeElement.closest('.monaco-diff-editor'))`)); i++) await sleep(250);
+    await sleep(300);
     await d.key('Escape');
     let now = [];
     for (let i = 0; i < 20; i++) { await sleep(250); now = await groupsNow(); if (now.some((x) => /add sub function/.test(x.active))) break; }
     assert(now.some((x) => /add sub function/.test(x.active) && !/↔/.test(x.active)), 'review not active: ' + JSON.stringify(now.map((x) => x.active)));
     return { note: `${g.active} → Esc → ${now.find((x) => /add sub function/.test(x.active)).active}` };
+  });
+  await step({ scenario: S2, action: '리뷰 화면 안내 줄의 "단축키 보기·바꾸기" (제목줄 키보드 버튼과 같음)', expect: '바로 가기 키 화면이 svnwt 명령으로 걸러져 열리고 F7·Alt+→ 등이 보임' }, async () => {
+    const hasBtn = await d.eval(`[...document.querySelectorAll('.editor-group-container .editor-actions .action-label')].some((a) => /단축키 보기/.test(a.getAttribute('aria-label') || ''))`);
+    assert(hasBtn, 'no keyboard button in the review title bar');
+    await d.webview(`(doc) => { const a = doc.querySelector('a[data-cmd="shortcuts"]'); if (!a) return null; a.click(); return true; }`, 8000, P.sub);
+    await d.waitFor(`(() => { const e = document.querySelector('.keybindings-editor'); return !!e && /다음 변경/.test(e.innerText) && /F7/.test(e.innerText); })()`, 10000, 'keybindings editor');
+    const txt = await d.eval(`document.querySelector('.keybindings-editor').innerText`);
+    assert(/@ext:svnwt\.svn-worktree/.test(txt) || !/파일 열기/.test(txt), 'not filtered to svnwt');
+    await d.key('w', { ctrl: true });
+    for (let i = 0; i < 20 && await d.eval(`!!document.querySelector('.keybindings-editor')`); i++) await sleep(250);
+    const rows = txt.split('\n').filter((l) => /F7|Alt\+|Escape/.test(l)).slice(0, 6);
+    return { note: rows.join(' | ') };
   });
   await step({ scenario: S2, action: '리뷰 화면에서 ↓ ↓ Enter', expect: '파일 행을 키보드로 골라 diff 열기 (두 번째 파일)' }, async () => {
     const focused = await d.webview(`(doc) => { const k = (key) => (doc.activeElement && doc.activeElement !== doc.body ? doc.activeElement : doc).dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); k('ArrowDown'); k('ArrowDown'); const a = doc.activeElement; const label = a && a.classList.contains('nav') ? a.querySelector('.path').textContent.trim() : ''; k('Enter'); return label; }`, 8000, P.sub);

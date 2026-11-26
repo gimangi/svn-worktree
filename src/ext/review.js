@@ -107,6 +107,7 @@ class ReviewPanel {
         case 'purge': return vscode.commands.executeCommand('svnwt.purgeTask', this.taskId);
         case 'rebaseLand': return vscode.commands.executeCommand('svnwt.rebaseAndLand', this.taskId);
         case 'openTask': return vscode.commands.executeCommand('svnwt.openReview', m.task);
+        case 'shortcuts': return vscode.commands.executeCommand('svnwt.showShortcuts');
         case 'refresh': return this.update();
         case 'checkSvn': return vscode.commands.executeCommand('svnwt.checkSvn', this.taskId);
         case 'openArtifact': return vscode.commands.executeCommand('vscode.open', vscode.Uri.file(m.file), { preview: true, viewColumn: vscode.ViewColumn.Beside });
@@ -290,7 +291,7 @@ class ReviewPanel {
       </header>
       ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
       ${info.history ? `<section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>
-      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면</div><table class="files">${fileRows}</table>` : '<p class="muted">없음</p>'}</section>` : ''}
+      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면 · <a href="#" data-cmd="shortcuts">단축키 보기·바꾸기</a></div><table class="files">${fileRows}</table>` : '<p class="muted">없음</p>'}</section>` : ''}
       ${(this.session || []).length ? this.renderAgent(t) : ''}
       <section><h2>리뷰</h2>${reviewHtml}</section>
       ${runs.length ? `<section><h2>테스트 화면 <span class="muted">(${runs.length}회)</span></h2>${this.renderRuns(runs, info.tip)}</section>` : ''}
@@ -340,7 +341,7 @@ class ReviewPanel {
       ${this.renderNext(info, files)}
       ${this.renderAgent(t)}
       ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
-      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면</div><table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
+      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면 · <a href="#" data-cmd="shortcuts">단축키 보기·바꾸기</a></div><table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
       <section><h2>테스트 화면${runs.length ? ` <span class="muted">(${runs.length}회)</span>` : ''}</h2>${this.renderRuns(runs, info.tip)}</section>
       <section><h2>리뷰</h2>${reviewHtml}</section>
       <section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>

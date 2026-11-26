@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -308,13 +308,13 @@
         "category": "SVN Worktree",
         "command": "svnwt.prevFile",
         "title": "이전 변경 파일",
-        "icon": "$(arrow-up)"
+        "icon": "$(arrow-left)"
       },
       {
         "category": "SVN Worktree",
         "command": "svnwt.nextFile",
         "title": "다음 변경 파일",
-        "icon": "$(arrow-down)"
+        "icon": "$(arrow-right)"
       },
       {
         "category": "SVN Worktree",
@@ -345,6 +345,12 @@
         "command": "svnwt.prevChange",
         "title": "이전 변경 (파일 처음에서는 이전 파일로)",
         "icon": "$(arrow-small-up)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.showShortcuts",
+        "title": "단축키 보기·바꾸기",
+        "icon": "$(keyboard)"
       }
     ],
     "menus": {
@@ -378,6 +384,11 @@
           "command": "svnwt.installInstructions",
           "when": "view == svnwt.tasks",
           "group": "z@2"
+        },
+        {
+          "command": "svnwt.showShortcuts",
+          "when": "view == svnwt.tasks",
+          "group": "z@3"
         },
         {
           "command": "svnwt.exportVisualStudio",
@@ -658,6 +669,16 @@
           "group": "navigation@0"
         },
         {
+          "command": "svnwt.prevChange",
+          "when": "svnwt.diffNav",
+          "group": "navigation@-5"
+        },
+        {
+          "command": "svnwt.nextChange",
+          "when": "svnwt.diffNav",
+          "group": "navigation@-4"
+        },
+        {
           "command": "svnwt.prevFile",
           "when": "svnwt.diffNav",
           "group": "navigation@-3"
@@ -681,6 +702,16 @@
           "command": "svnwt.diffToReview",
           "when": "svnwt.diffNav && config.svnwt.diffPlacement == 'window'",
           "group": "navigation@0"
+        },
+        {
+          "command": "svnwt.showShortcuts",
+          "when": "activeWebviewPanelId == 'svnwt.review'",
+          "group": "navigation@9"
+        },
+        {
+          "command": "svnwt.showShortcuts",
+          "when": "svnwt.diffNav",
+          "group": "svnwt@1"
         }
       ]
     },

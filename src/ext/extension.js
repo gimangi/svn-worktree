@@ -642,6 +642,8 @@ function registerCommands(ctx) {
   reg('svnwt.nextChange', () => stepChange(1));
   reg('svnwt.prevChange', () => stepChange(-1));
   reg('svnwt.backToReview', () => { if (diffNav) ReviewPanel.show(ctxApi, diffNav.taskId, {}); });
+  // Keyboard Shortcuts filtered to this extension: shows the keys as the user has them (bound ones first) and lets them change one
+  reg('svnwt.showShortcuts', () => vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', `@ext:${ctx.extension.id}`));
   // the choice is saved in the setting: the next diff opens the same way
   reg('svnwt.diffToWindow', async () => {
     await setDiffPlacement('window');
