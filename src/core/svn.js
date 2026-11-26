@@ -96,6 +96,19 @@ class Svn {
     return parseStatus(xml);
   }
 
+  /**
+   * Commits on the server after `fromRev` that touch `url` (newest last), with their changed paths.
+   * Talks to the server; returns [] when there is nothing after fromRev.
+   * @returns {Promise<Array<{revision:number, author:string, date:string, msg:string, paths:Array<{action:string, kind:string, path:string}>}>>}
+   */
+  async logAfter(url, fromRev, { limit = 50 } = {}) {
+    const r = await this.raw(['log', '--xml', '-v', '--limit', String(limit), '-r', `${fromRev + 1}:HEAD`, url]);
+    const out = decode(r.stdout);
+    // "No such revision" when fromRev is already HEAD
+    if (r.code !== 0) { if (/E160006|No such revision|E195012/i.test(decode(r.stderr))) return []; throw new CmdError(`svn log 실패 (exit ${r.code}): ${decode(r.stderr).trim()}`, { args: ['log'], stderr: decode(r.stderr) }); }
+    return parseLog(out);
+  }
+
   /** Pristine (BASE) content in working-copy form (keywords expanded, native eol). */
   async catBase(file) {
     const r = await this.raw(['cat', '-r', 'BASE', file]);
@@ -183,4 +196,19 @@ function parseStatus(xml) {
   return res;
 }
 
-module.exports = { Svn, parseStatus, parseInfo };
+function parseLog(xml) {
+  const res = [];
+  const re = /<logentry\s([^>]*)>([\s\S]*?)<\/logentry>/g;
+  let m;
+  while ((m = re.exec(xml))) {
+    const body = m[2];
+    const paths = [];
+    const pr = /<path\s([^>]*)>([^<]*)<\/path>/g;
+    let p;
+    while ((p = pr.exec(body))) { const a = attrs(p[1]); paths.push({ action: a.action, kind: a.kind || '', path: xmlUnescape(p[2]) }); }
+    res.push({ revision: parseInt(attrs(m[1]).revision, 10), author: tagText(body, 'author') || '', date: tagText(body, 'date') || '', msg: (tagText(body, 'msg') || '').trim(), paths });
+  }
+  return res;
+}
+
+module.exports = { Svn, parseStatus, parseInfo, parseLog };

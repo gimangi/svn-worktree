@@ -739,6 +739,55 @@ async function main() {
   assert(res[5].result.messages[0].content.text.includes('svnwt_task_review_get'));
   ok(`MCP stdio: ${res[2].result.tools.length} tools, status/info/prompt`);
 
+  // ---------------------------------------------------------------- background SVN checks (svnWatch)
+  {
+    const C = await s.createTask(scope.id, { title: 'behind check' });
+    const before = (await s.serverCommits(scope.id)).pending.map((p) => p.revision);
+    // own commit from this working copy: already here, not "new on the server"
+    W(path.join(appDir, 'own.txt'), 'mine\n');
+    svn('add', path.join(appDir, 'own.txt'));
+    svn('commit', '-m', 'own commit', path.join(appDir, 'own.txt'));
+    // someone else's commit from another checkout
+    const other = path.join(ROOT, 'other');
+    svn('checkout', url + '/trunk/app', other);
+    W(path.join(other, 'theirs.txt'), 'theirs\n');
+    svn('add', path.join(other, 'theirs.txt'));
+    svn('commit', '-m', 'their commit', other);
+    const theirRev = Number(/<entry[^>]*revision="(\d+)"/.exec(svn('info', '--xml', path.join(other, 'theirs.txt')))[1]);
+    const sc = await s.serverCommits(scope.id);
+    const fresh = sc.pending.map((p) => p.revision).filter((r) => !before.includes(r));
+    assert.deepStrictEqual(fresh, [theirRev], JSON.stringify({ before, pending: sc.pending }));
+    assert(sc.pending.find((p) => p.revision === theirRev).msg === 'their commit');
+    assert.strictEqual((await s.wcRevision(scope.id)).changed, false, 'working copy not updated yet');
+    // the user updates (TortoiseSVN): working copy revision moves, svnwt notices without the server
+    svn('update', appDir);
+    assert.strictEqual((await s.wcRevision(scope.id)).changed, true);
+    assert(!(await s.serverCommits(scope.id)).pending.some((p) => p.revision === theirRev), 'their commit is here now');
+    await s.refreshScope(scope.id);
+    assert.strictEqual((await s.wcRevision(scope.id)).changed, false);
+    const behind = await s.tasksBehind(scope.id);
+    const c = behind.find((x) => x.id === C.id);
+    assert(c && c.behind > 0 && c.blocked === null, JSON.stringify(behind));
+    W(path.join(C.workPath, 'wip.txt'), 'not committed\n');
+    assert.strictEqual((await s.tasksBehind(scope.id)).find((x) => x.id === C.id).blocked, '커밋되지 않은 변경');
+    fs.rmSync(path.join(C.workPath, 'wip.txt'));
+    assert((await s.syncTask(C.id, { refresh: false })).ok);
+    assert(fs.existsSync(path.join(C.workPath, 'theirs.txt')) && !(await s.tasksBehind(scope.id)).some((x) => x.id === C.id));
+    ok(`svnWatch: server commits (own r excluded, theirs r${theirRev}), working copy revision, tasks behind / blocked, rebase`);
+
+    // rename: title and (not in the working copy yet) changelist follow; id, branch, worktree stay
+    const r1 = s.renameTask(C.id, '  뒤처짐   확인 작업 ');
+    assert.strictEqual(r1.task.title, '뒤처짐 확인 작업');
+    assert.strictEqual(r1.task.id, C.id);
+    assert.strictEqual(r1.task.branch, C.branch);
+    assert.strictEqual(r1.task.workPath, C.workPath);
+    assert(r1.changelist !== C.changelist && r1.changelist.startsWith(`svnwt-${C.no}`), r1.changelist);
+    assert.throws(() => s.renameTask(C.id, '   '), /비어/);
+    const landed = s.listTasks({ scope: scope.id }).find((x) => x.status === 'landed' || x.status === 'committed');
+    if (landed) assert.strictEqual(s.renameTask(landed.id, landed.title + ' (이름 변경)').changelist, landed.changelist, 'changelist in the working copy keeps its name');
+    ok(`rename task: title, changelist ${r1.changelist}${landed ? `; ${landed.status} task keeps its changelist` : ''}`);
+  }
+
   console.log(`\n# all ${step} checks passed`);
   if (process.env.SVNWT_KEEP) console.log(`KEEP_ROOT=${ROOT}\nKEEP_WC=${wc}`);
   else {

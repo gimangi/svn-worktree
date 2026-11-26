@@ -77,6 +77,12 @@ const TOOLS = [
     handler: (svc, a) => svc.taskInfo(a.task),
   },
   {
+    name: 'svnwt_task_rename',
+    description: 'Rename a task (its title in the SVN Worktree view and the default SVN commit message). Id, branch and worktree path stay.',
+    inputSchema: { type: 'object', required: ['task', 'title'], properties: { task: TASK, title: str('New task name') } },
+    handler: (svc, a) => { const r = svc.renameTask(a.task, a.title); return { task: r.task.id, title: r.task.title, old: r.old, changelist: r.changelist }; },
+  },
+  {
     name: 'svnwt_task_commit',
     description: 'Stage all changes in the task worktree (git add -A) and commit them on the task branch.',
     inputSchema: { type: 'object', required: ['task', 'message'], properties: { task: TASK, message: str('Commit message (first line = summary).') } },

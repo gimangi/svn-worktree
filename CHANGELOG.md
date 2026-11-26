@@ -1,5 +1,17 @@
 # 변경 이력
 
+## 0.5.0
+- **SVN 을 백그라운드에서 확인하고 필요할 때만 묻기**: *SVN 기준 다시 읽기*, *최신 SVN 기준으로 rebase*, *SVN 상태 확인* 을 찾아 누를 필요가 없음
+  - working copy: 1분마다와 VS Code 창으로 돌아올 때 scope 폴더에 `svn info` 한 번 (서버 접속 없음). TortoiseSVN 으로 update 해서 revision 이 바뀌면 SVN 기준을 조용히 다시 읽고, 진행 중인 작업이 옛 기준이면 "새 기준으로 rebase 할까요?" 를 한 번 물음. 같은 줄을 고쳐 충돌하면 그 작업은 rebase 하지 않고(바로 되돌림) 알려 주고 *충돌 해결하기* 로 이어감. 커밋되지 않은 변경이 있거나 에이전트가 실행 중인 작업은 빼고 물음
+  - 서버: 10분마다 scope 폴더의 새 커밋을 확인. 내가 커밋한 것은 빼고, 남이 커밋한 것이 있으면 "svn update 할까요?" 를 새 revision 마다 한 번 물음. update 후 바로 rebase 를 물음
+  - changelist 를 만든 작업을 TortoiseSVN 에서 직접 커밋하면 커밋 완료로 표시 (svn 이 working copy 에 쓴 때만 확인)
+  - 커밋 준비 중이거나 다른 svnwt 작업이 잠금을 잡고 있으면 건너뜀. 실패(서버 접속 불가 등)는 출력 패널에만 기록
+  - 설정 `svnwt.svnWatch` (기본 켬), `svnwt.svnServerCheckMinutes` (기본 10, 0 이면 서버 확인 안 함). 바로 확인: 명령 *SVN 지금 확인*
+  - 메뉴 정리: scope 의 *SVN 기준 다시 읽기*, 작업의 *최신 SVN 기준으로 rebase*·*SVN 상태 확인* 을 우클릭 메뉴에서 뺌 (명령 팔레트에는 남음, 리뷰 화면은 기준이 뒤처졌을 때 rebase 버튼 표시)
+- **작업 이름 변경**: 트리에서 `F2`, 우클릭 *작업 이름 변경…*, 리뷰 화면 제목 옆 ✎, MCP `svnwt_task_rename`. 브랜치·worktree 폴더는 그대로이고, SVN changelist 이름은 아직 working copy 에 올리지 않은 작업만 새 이름을 따름
+- 리뷰 화면의 *에이전트 세션* 은 기본으로 접혀 한 줄(상태, 요청 수, 마지막 메시지)만 차지. 펼친 상태는 작업별로 기억
+- 새 아이콘: SVN trunk 에서 자란 작업 나무(worktree)와 에이전트 반짝임. 소스 제어 아이콘과 구별됨
+
 ## 0.4.10
 - **diff 단축키 변경**: `Alt+→` / `Alt+←` 다음·이전 변경 (파일 끝에서는 다음 파일의 첫 변경으로 이어짐), `Alt+Shift+→` / `Alt+Shift+←` 다음·이전 파일. `F7` / `Shift+F7` 은 VS Code 기본 동작으로 돌려줌. svnwt diff 를 보는 동안에만 VS Code 의 뒤로/앞으로 이동, 선택 영역 확장·축소 대신 동작
 - diff 제목줄 버튼 아이콘: 변경 ← →, 파일 ‹ ›

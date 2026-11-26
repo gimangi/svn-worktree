@@ -237,21 +237,23 @@ async function scenarios(d, ctx) {
   const tabAt = (re) => d.eval(`(() => { const t = [...document.querySelectorAll('.editor-group-container .tab')].find((x) => ${re}.test(x.getAttribute('aria-label') || '')); if (!t) return null; t.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const b = t.getBoundingClientRect(); const c = (t.closest('.tabs-and-actions-container .monaco-scrollable-element') || t.closest('.tabs-container')).getBoundingClientRect(); return { x: Math.min(Math.max(b.left + b.width / 2, c.left + 4), c.right - 4), y: b.top + b.height / 2, inView: b.left >= c.left - 1 && b.right <= c.right + 1 }; })()`);
   const focusDiff = async () => { for (let i = 0; i < 20 && !(await d.eval(`!!(document.activeElement && document.activeElement.closest('.monaco-diff-editor'))`)); i++) await sleep(250); await sleep(300); };
   await step({ scenario: S2, action: 'diff 탭을 고정해 두고 다른 파일 diff 를 연 뒤, 고정한 탭으로 돌아가 Alt+Shift+→', expect: '마지막에 연 diff 가 아니어도 그 탭의 다음 파일로 (열린 탭 사이를 오가지 않음)' }, async () => {
-    await d.webview(`(doc) => { doc.querySelector('tr.file').click(); return true; }`, 8000, P.sub);
-    await activeDiff(/main\.cpp .*1\/3/);
-    const t1 = await tabAt('/^main\\.cpp \\(r/');
-    assert(t1, 'no main.cpp tab');
-    await d.mouse('mousePressed', t1.x, t1.y, 'left', 1); await d.mouse('mouseReleased', t1.x, t1.y, 'left', 1);
-    await d.mouse('mousePressed', t1.x, t1.y, 'left', 2); await d.mouse('mouseReleased', t1.x, t1.y, 'left', 2); // double-click: keep the tab
-    await sleep(500);
+    // activate a tab by clicking it (again if the click did not take)
+    const clickTab = async (re, expect) => {
+      for (let k = 0; k < 3; k++) {
+        const t = await tabAt(re);
+        if (t) { await d.mouse('mouseMoved', t.x, t.y); await d.mouse('mousePressed', t.x, t.y); await d.mouse('mouseReleased', t.x, t.y); }
+        try { return await activeDiff(expect, 3000); } catch (_) { /* again */ }
+      }
+      throw new Error(`tab ${re} not activated: ${JSON.stringify((await groupsNow()).map((x) => x.tabs))}`);
+    };
+    // the main.cpp diff of the previous step is still open behind the review: activate it and keep it
+    await clickTab('/^main\\.cpp \\(r/', /main\.cpp .*1\/3/);
+    await d.command('View: Keep Editor');
     await clickTitleButton('/^리뷰 화면으로/');
     await sleep(600);
     await d.webview(`(doc) => { doc.querySelectorAll('tr.file')[2].click(); return true; }`, 8000, P.sub);
     await activeDiff(/mathutil\.h .*3\/3/);
-    const t2 = await tabAt('/^main\\.cpp \\(r/');
-    assert(t2 && t2.inView, 'kept main.cpp tab not visible: ' + JSON.stringify(t2) + ' ' + JSON.stringify((await groupsNow()).map((x) => x.tabs)));
-    await d.mouse('mousePressed', t2.x, t2.y); await d.mouse('mouseReleased', t2.x, t2.y);
-    await activeDiff(/main\.cpp .*1\/3/);
+    await clickTab('/^main\\.cpp \\(r/', /main\.cpp .*1\/3/);
     await focusDiff();
     await d.key('ArrowRight', { alt: true, shift: true });
     const g = await activeDiff(/mathutil\.cpp .*2\/3/);
@@ -686,6 +688,89 @@ async function scenarios(d, ctx) {
     assert(fsx.readFileSync(leftFile, 'utf8') === leftOrig, 'main.cpp not reverted');
     assert(wts.every((p) => fsx.existsSync(p)), 'a worktree was removed');
     return { note: `${note.slice(0, 120)} / 알림: ${(await d.notifications()).join(' | ').slice(0, 160)}` };
+  });
+
+  // ---------------------------------------------------------------- 12
+  const S12 = '12. SVN 이 바뀌면 svnwt 가 묻는다 (rebase 를 찾아 누를 필요 없음)';
+  const scope0 = ctx.svc.listScopes()[0];
+  const toastButton = async (textRe, label, ms = 20000) => {
+    await d.waitFor(`[...document.querySelectorAll('.notifications-toasts .notification-list-item')].some((n) => ${textRe}.test(n.textContent) && [...n.querySelectorAll('.monaco-button')].some((b) => b.textContent.trim() === ${JSON.stringify(label)}))`, ms, 'toast ' + textRe);
+    const msg = (await d.notifications()).find((x) => new RegExp(textRe.slice(1, -1)).test(x)) || '';
+    const at = () => d.eval(`(() => { const n = [...document.querySelectorAll('.notifications-toasts .notification-list-item')].find((x) => ${textRe}.test(x.textContent)); if (!n) return null; const b = [...n.querySelectorAll('.monaco-button')].find((x) => x.textContent.trim() === ${JSON.stringify(label)}); if (!b) return null; const q = b.getBoundingClientRect(); return { x: q.left + q.width / 2, y: q.top + q.height / 2 }; })()`);
+    // toasts slide in: click once it stands still, again if it is still there
+    for (let i = 0; i < 3; i++) {
+      await sleep(700);
+      const r = await at();
+      if (!r) break;
+      await d.mouse('mouseMoved', r.x, r.y);
+      await d.mouse('mousePressed', r.x, r.y); await d.mouse('mouseReleased', r.x, r.y);
+      await sleep(1500);
+      if (!(await at())) break;
+    }
+    return msg;
+  };
+  await step({ scenario: S12, action: '다른 사람이 SVN 서버에 커밋 → "SVN Worktree: SVN 지금 확인"', expect: '"SVN 서버에 새 커밋 1개" 알림 (내가 커밋한 것은 빼고) → svn update' }, async () => {
+    const cp = require('child_process');
+    const url = /<url>([^<]+)<\/url>/.exec(cp.execFileSync(svnExe, ['info', '--xml', scope0.svnPath], { encoding: 'utf8' }))[1];
+    const other = path.join(path.dirname(ctx.demo), 'other-checkout');
+    cp.execFileSync(svnExe, ['checkout', '-q', url, other]);
+    fsx.writeFileSync(path.join(other, 'NOTES.txt'), '다른 사람이 추가한 파일\r\n');
+    cp.execFileSync(svnExe, ['add', '-q', path.join(other, 'NOTES.txt')]);
+    cp.execFileSync(svnExe, ['commit', '-q', '-m', '다른 사람의 커밋', other]);
+    ctx.fresh = await ctx.svc.createTask(scope0.id, { title: 'rebase 대상' });
+    await sleep(1500);
+    await d.command('SVN Worktree: SVN 지금 확인');
+    const msg = await toastButton('/SVN 서버에 새 커밋 1개/', 'svn update');
+    for (let i = 0; i < 100 && !fsx.existsSync(path.join(scope0.svnPath, 'NOTES.txt')); i++) await sleep(300);
+    assert(fsx.existsSync(path.join(scope0.svnPath, 'NOTES.txt')), 'svn update did not run: ' + JSON.stringify({ msg, toasts: await d.notifications(), marker: ctx.svc.pendingCommits().map((m) => m.task), svn: scope0.svnPath }));
+    return { note: msg };
+  });
+  await step({ scenario: S12, action: '이어서 뜨는 알림 "새 기준으로 rebase 할까요?" → rebase', expect: '진행 중인 작업이 새 SVN 기준으로 옮겨짐 (worktree 에 NOTES.txt), 충돌 없으면 조용히 끝남' }, async () => {
+    const msg = await toastButton('/rebase 할까요/', 'rebase');
+    // a clean task is rebased; one that changed the same lines as newer SVN commits is left as it was and reported
+    let left = [];
+    let conflictMsg = '';
+    for (let i = 0; i < 60; i++) {
+      await sleep(500);
+      left = (await ctx.svc.tasksBehind(scope0.id)).filter((t) => !t.blocked);
+      conflictMsg = (await d.notifications()).find((x) => /rebase 하지 않았습니다/.test(x)) || '';
+      if (!left.some((t) => t.id === ctx.fresh.id) && (!left.length || conflictMsg)) break;
+    }
+    assert(!left.some((t) => t.id === ctx.fresh.id) && fsx.existsSync(path.join(ctx.fresh.workPath, 'NOTES.txt')), 'clean task not rebased: ' + JSON.stringify(left));
+    for (const t of left) assert(conflictMsg.includes('#' + t.no), `#${t.no} neither rebased nor reported: ${conflictMsg}`);
+    const active = ctx.svc.listTasks({ scope: scope0.id }).filter((t) => t.status === 'active');
+    const moved = active.filter((t) => fsx.existsSync(path.join(t.workPath, 'NOTES.txt')));
+    return { note: `${msg.slice(0, 160)} · 옮겨진 작업: ${moved.map((t) => '#' + t.no).join(', ')}${conflictMsg ? ` · 충돌 알림: ${conflictMsg.slice(0, 140)}` : ''}` };
+  });
+
+  // ---------------------------------------------------------------- 13
+  const S13 = '13. 작업 이름 변경 / 에이전트 세션 접힘';
+  await step({ scenario: S13, action: '에이전트 작업 리뷰 화면의 "에이전트 세션"', expect: '기본으로 접혀 한 줄(상태 + 마지막 메시지)만 차지' }, async () => {
+    const r = await d.webview(`(doc) => { const b = doc.getElementById('agentBox'); if (!b) return null; const s = b.querySelector('summary'); return { open: b.open, h: Math.round(s.getBoundingClientRect().height), text: s.textContent.replace(/\\s+/g, ' ').trim() }; }`, 15000, agentTaskNo + '-');
+    assert(r && !r.open && r.h < 40, JSON.stringify(r));
+    return { note: `${r.text.slice(0, 120)} (높이 ${r.h}px)` };
+  });
+  await step({ scenario: S13, action: '트리에서 "report mul output" 선택 → F2 → 새 이름 입력', expect: '목록과 리뷰 화면 제목이 새 이름으로 (브랜치·worktree 는 그대로)' }, async () => {
+    const before = ctx.svc.listTasks().find((t) => /report mul output/.test(t.title));
+    await d.command('Notifications: Clear All Notifications');
+    await d.click('.sidebar .monaco-list-row', 'report mul output');
+    await sleep(600);
+    await d.key('F2');
+    try { await d.waitFor(`!!document.querySelector('.quick-input-widget:not([style*="display: none"]) input')`, 8000, 'rename input'); } catch (e) {
+      throw new Error(e.message + ' ' + JSON.stringify(await d.eval(`(() => { const a = document.activeElement; return { tag: a && a.tagName, cls: a && String(a.className).slice(0, 80), view: a && a.closest('[id]') && a.closest('[id]').id, sel: [...document.querySelectorAll('.monaco-list-row.selected')].map((r) => r.getAttribute('aria-label')).slice(0, 3) }; })()`)));
+    }
+    await d.type('mul 결과 출력');
+    await sleep(600);
+    await d.key('Enter');
+    await sleep(1000);
+    if (await d.eval(`!!document.querySelector('.quick-input-widget:not([style*="display: none"]) input')`)) await d.key('Enter');
+    await d.waitFor(`[...document.querySelectorAll('.monaco-list-row')].some((r) => (r.getAttribute('aria-label') || '').includes('mul 결과 출력'))`, 10000, 'renamed row');
+    const after = ctx.svc.resolveTask(before.id).task;
+    assert(after.title === 'mul 결과 출력' && after.branch === before.branch && after.workPath === before.workPath, JSON.stringify({ t: after.title, b: after.branch }));
+    let tabs = [];
+    for (let i = 0; i < 20; i++) { tabs = await d.eval(`[...document.querySelectorAll('.editor-group-container .tab .label-name, .editor-group-container .tab .monaco-icon-label')].map((e) => e.textContent.trim())`); if (tabs.some((t) => /mul 결과 출력/.test(t))) break; await sleep(250); }
+    assert(tabs.some((t) => /#\d+ mul 결과 출력/.test(t)), 'review tab title: ' + tabs.join(' | '));
+    return { note: `#${after.no}: "${before.title}" → "${after.title}" · 탭: ${tabs.filter((t) => /#\d/.test(t)).join(' | ').slice(0, 160)}` };
   });
 }
 

@@ -12,8 +12,12 @@ const { GitFs, SCHEME } = require('./gitfs');
 const { ReviewPanel } = require('./review');
 const setup = require('./setup');
 const { setupAgent } = require('./agentUi');
+const { createSvnWatch } = require('./svnWatch');
 
 let service;
+let svnWatch = null;
+let taskView = null;
+let treeTaskId = null; // last task selected in the tree (the tree's own selection is lost when it refreshes)
 let tree;
 let output;
 let mcpRegistered = false;
@@ -560,6 +564,8 @@ function registerCommands(ctx) {
   reg('svnwt.refresh', () => refreshAll());
   reg('svnwt.checkSvn', async (arg) => {
     const id = taskIdOf(arg);
+    // without a task: the whole background round now (server, working copy, rebase, commits)
+    if (!id && svnWatch) { vscode.window.setStatusBarMessage('$(sync~spin) SVN 확인 중…', 3000); await svnWatch.checkNow(); return; }
     const r = await withProgress(id ? 'SVN 상태 확인 중…' : '모든 작업의 SVN 상태 확인 중…', () => service.checkSvnState(id || undefined));
     refreshAll();
     const label = { active: '진행 중', landed: '커밋 대기', committed: '커밋 완료' };
@@ -592,17 +598,20 @@ function registerCommands(ctx) {
     const s = await pickScope(arg);
     const r = await withProgress(`SVN 기준 읽는 중: ${s.id}`, () => service.refreshScope(s.id));
     refreshAll();
-    vscode.window.showInformationMessage(`${s.id}: r${r.revision} ${r.changed ? '새 기준 커밋 생성' : '변경 없음'}${r.mixedRevision ? ` (mixed ${r.mixedRevision})` : ''}`);
+    vscode.window.setStatusBarMessage(`${s.id}: r${r.revision} ${r.changed ? '새 기준' : '변경 없음'}${r.mixedRevision ? ` (mixed ${r.mixedRevision})` : ''}`, 5000);
+    if (svnWatch) await svnWatch.offerRebase(service.resolveScope(s.id), null, { always: true });
   });
 
   reg('svnwt.svnUpdateScope', async (arg) => {
     const s = await pickScope(arg);
     const ok = await vscode.window.showWarningMessage(`"${s.svnPath}" 에서 svn update 를 실행합니다.`, { modal: true }, '실행');
     if (ok !== '실행') return;
+    const from = s.revision;
     const r = await withProgress(`svn update: ${s.id}`, () => service.refreshScope(s.id, { svnUpdate: true }));
     log(r.svnUpdate || '');
     refreshAll();
-    vscode.window.showInformationMessage(`${s.id}: r${r.revision} 로 갱신되었습니다. 진행 중인 작업은 "최신 SVN 기준으로 rebase"를 실행하세요.`);
+    vscode.window.setStatusBarMessage(`${s.id}: r${r.revision} 로 갱신`, 5000);
+    if (svnWatch) await svnWatch.offerRebase(service.resolveScope(s.id), from, { always: true });
   });
 
   reg('svnwt.removeScope', async (arg) => {
@@ -889,6 +898,22 @@ function registerCommands(ctx) {
     ReviewPanel.refreshAll();
     if (r.warnings.length) vscode.window.showWarningMessage(r.warnings.join('\n'));
     else vscode.window.setStatusBarMessage(`#${t.no} 을 보관했습니다 (보관된 작업에서 조회).`, 5000);
+  });
+
+  // F2 in the tree: the selected task (keybindings pass no argument)
+  reg('svnwt.renameTask', async (arg) => {
+    let id = taskIdOf(arg);
+    if (!id && taskView && taskView.selection.length) id = taskIdOf(taskView.selection[0]);
+    if (!id && treeTaskId) { try { service.resolveTask(treeTaskId); id = treeTaskId; } catch (_) { treeTaskId = null; } }
+    const t = id ? service.resolveTask(id).task : await pickTask(null);
+    const title = await vscode.window.showInputBox({ title: `#${t.no} 작업 이름 변경`, value: t.title, valueSelection: [0, t.title.length],
+      prompt: 'SVN Worktree 목록과 리뷰 화면, 기본 SVN 커밋 메시지에 쓰입니다. 브랜치와 worktree 폴더 이름은 그대로입니다.',
+      validateInput: (v) => (v.trim() ? null : '이름을 입력하세요') });
+    if (title === undefined || title.trim() === t.title) return;
+    const r = service.renameTask(t.id, title);
+    refreshAll();
+    for (const p of ReviewPanel.panels.values()) if (p.taskId === t.id && !p.disposed) { p.panel.title = `#${t.no} ${r.task.title}`; p.update(); }
+    vscode.window.setStatusBarMessage(`#${t.no} 이름 변경: ${r.task.title}`, 4000);
   });
 
   reg('svnwt.purgeTask', async (arg) => {
@@ -1405,7 +1430,7 @@ function watchEvents(ctx) {
   }, 5000);
   ctx.subscriptions.push({ dispose: () => clearInterval(iv) });
 
-  // SVN is not checked automatically: "SVN 상태 확인" (svnwt.checkSvn) does it on request.
+  // SVN itself is checked in the background by svnWatch (src/ext/svnWatch.js).
 }
 
 function statusBar(ctx) {
@@ -1469,11 +1494,15 @@ async function activate(ctx) {
     return setup.instructionFiles(ctx, { roots, worktrees });
   };
   syncRules(ctx);
-  ctx.subscriptions.push(vscode.window.createTreeView('svnwt.tasks', { treeDataProvider: tree, showCollapseAll: true }));
+  taskView = vscode.window.createTreeView('svnwt.tasks', { treeDataProvider: tree, showCollapseAll: true });
+  ctx.subscriptions.push(taskView);
+  ctx.subscriptions.push(taskView.onDidChangeSelection((e) => { if (e.selection.length) treeTaskId = taskIdOf(e.selection[0]); }));
   ctx.subscriptions.push(vscode.workspace.registerFileSystemProvider(SCHEME, new GitFs(service), { isReadonly: true, isCaseSensitive: true }));
   registerCommands(ctx);
   registerMcp(ctx);
   watchEvents(ctx);
+  svnWatch = createSvnWatch({ vscode, service, refreshAll, log });
+  if (!process.env.SVNWT_NO_SVN_WATCH) svnWatch.start(ctx);
   statusBar(ctx);
 
   checkEnvironment(false).then(async () => {

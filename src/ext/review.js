@@ -105,6 +105,7 @@ class ReviewPanel {
         case 'discardLeftovers': return vscode.commands.executeCommand('svnwt.discardLeftovers', this.taskId);
         case 'discardScope': return vscode.commands.executeCommand('svnwt.discardScopeChanges', this.taskId);
         case 'purge': return vscode.commands.executeCommand('svnwt.purgeTask', this.taskId);
+        case 'rename': return vscode.commands.executeCommand('svnwt.renameTask', this.taskId);
         case 'rebaseLand': return vscode.commands.executeCommand('svnwt.rebaseAndLand', this.taskId);
         case 'openTask': return vscode.commands.executeCommand('svnwt.openReview', m.task);
         case 'shortcuts': return vscode.commands.executeCommand('svnwt.showShortcuts');
@@ -267,12 +268,16 @@ class ReviewPanel {
       return `<div class="info muted">${esc(e.text)}</div>`;
     }).join('');
     const canTalk = t.status === 'active' || t.status === 'landed';
-    return `<section class="agent"><h2>에이전트 세션 ${badge}</h2>
+    // folded by default (one line: state + the latest message); opening it is remembered per task
+    const last = [...(this.session || [])].reverse().find((e) => e.text || e.label);
+    const lastLine = last ? String(last.text || last.label).replace(/\s+/g, ' ').trim() : '';
+    const n = (this.session || []).filter((e) => e.role === 'user').length;
+    return `<section class="agent"><details id="agentBox"><summary><h2>에이전트 세션</h2> ${badge} <span class="muted last">${n ? `요청 ${n}개 · ` : ''}${esc(lastLine.length > 90 ? lastLine.slice(0, 90) + '…' : lastLine)}</span></summary>
       ${items ? `<div class="transcript" id="transcript">${items}</div>` : '<p class="muted">아직 에이전트 대화가 없습니다. 아래에 지시를 쓰거나 채팅에서 <code>@svnwt</code> 로 시작하세요.</p>'}
       ${t.agent && t.agent.state === 'waiting' && t.agent.waitingFor ? `<div class="note note-warn">명령 실행 승인 대기: <code>${esc(t.agent.waitingFor)}</code></div>` : ''}
       ${canTalk ? `<textarea id="agentInput" rows="3" placeholder="에이전트에게 지시 (Ctrl+Enter 로 보내기)"${running ? ' disabled' : ''}></textarea>
       <div class="actions">${running ? '<button data-cmd="agentStop">중지</button>' : '<button id="agentSend" class="primary">지시 보내기</button>'}<button data-cmd="agentChat">채팅에서 이어가기</button></div>` : ''}
-    </section>`;
+    </details></section>`;
   }
 
   /** Read-only history of an archived task. */
@@ -284,7 +289,7 @@ class ReviewPanel {
     return `
       ${this.isPreview ? '<div class="pv muted">미리보기 탭 — 다른 작업을 열면 이 탭에 표시됩니다 · <a href="#" data-cmd="keep">탭 유지</a></div>' : ''}
       <header>
-        <h1>#${t.no} ${esc(t.title)} <span class="badge muted" title="${esc(STATUS_TEXT.archived)}">보관됨</span></h1>
+        <h1>#${t.no} ${esc(t.title)} <a href="#" data-cmd="rename" class="rename" title="이름 변경">✎</a> <span class="badge muted" title="${esc(STATUS_TEXT.archived)}">보관됨</span></h1>
         <div class="meta">생성 ${d(t.createdAt)} · ${svn} · 보관 ${d(t.archivedAt)}</div>
         <div class="meta">${info.history ? `커밋 ${info.commits.length}개 · 파일 ${files.length}개 <span class="plus">+${add}</span> <span class="minus">-${del}</span>` : '<span class="muted">0.4.7 이하 버전에서 정리되어 git 커밋 기록이 없습니다. 리뷰와 에이전트 대화만 남아 있습니다.</span>'}</div>
         <div class="meta muted">worktree 는 삭제되었습니다 · <a href="#" data-cmd="purge" class="danger">기록 삭제</a></div>
@@ -332,7 +337,7 @@ class ReviewPanel {
     const body = `
       ${this.isPreview ? '<div class="pv muted">미리보기 탭 — 다른 작업을 열면 이 탭에 표시됩니다 · <a href="#" data-cmd="keep">탭 유지</a></div>' : ''}
       <header>
-        <h1>#${t.no} ${esc(t.title)} <span class="badge ${STATUS_CLASS[t.status]}" title="${esc(STATUS_TEXT[t.status] || '')}">${esc(t.status === 'active' && t.readyAt ? '리뷰 대기' : (STATUS_LABEL[t.status] || t.status))}</span>
+        <h1>#${t.no} ${esc(t.title)} <a href="#" data-cmd="rename" class="rename" title="이름 변경">✎</a> <span class="badge ${STATUS_CLASS[t.status]}" title="${esc(STATUS_TEXT[t.status] || '')}">${esc(t.status === 'active' && t.readyAt ? '리뷰 대기' : (STATUS_LABEL[t.status] || t.status))}</span>
           ${lastRun && lastRun.status ? `<span class="badge ${lastRun.status === 'passed' ? 'ok' : 'bad'}">테스트 ${lastRun.status === 'passed' ? '통과' : '실패'}</span>` : ''}
           ${latest ? `<span class="badge ${(VERDICT[latest.verdict] || [])[1] || 'info'}">리뷰: ${esc((VERDICT[latest.verdict] || [latest.verdict])[0])}</span>` : ''}</h1>
         <div class="meta">SVN r${esc(info.scope.revision)} 기준 · 커밋 ${info.commits.length}개 · 파일 ${files.length}개 <span class="plus">+${add}</span> <span class="minus">-${del}</span></div>
@@ -383,6 +388,10 @@ class ReviewPanel {
   .tool { font-family: var(--vscode-editor-font-family); font-size: 0.88em; color: var(--vscode-descriptionForeground); margin: 2px 0 2px 6px; }
   .tool.fail { color: var(--vscode-errorForeground); } .info { font-style: italic; margin: 6px 0; }
   #agentInput { margin-top: 4px; }
+  a.rename { font-size: 0.7em; text-decoration: none; opacity: 0.55; } a.rename:hover { opacity: 1; }
+  #agentBox > summary { cursor: pointer; margin-top: 20px; padding-bottom: 4px; border-bottom: 1px solid var(--vscode-panel-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #agentBox > summary h2 { display: inline; margin: 0; padding: 0; border: none; } #agentBox > summary .last { font-size: 0.9em; margin-left: 6px; }
+  section.agent { margin-bottom: 6px; }
   .pv { font-size: 0.85em; margin-top: 8px; } .sub { margin-top: 6px; font-size: 0.92em; }
   details.cmd summary { cursor: pointer; color: var(--vscode-textLink-foreground); margin-top: 6px; }
   figure.shot.failed { border-color: var(--vscode-errorForeground); }
@@ -453,6 +462,15 @@ class ReviewPanel {
   }
   const sb = document.getElementById('agentSend');
   if (sb) sb.addEventListener('click', send);
+  const ab = document.getElementById('agentBox');
+  if (ab) {
+    if (((vscode.getState() || {}).agentOpen || {})[task]) ab.open = true;
+    ab.addEventListener('toggle', () => {
+      const s = vscode.getState() || {};
+      vscode.setState(Object.assign({}, s, { agentOpen: Object.assign({}, s.agentOpen || {}, { [task]: ab.open }) }));
+      if (ab.open && tr) tr.scrollTop = tr.scrollHeight;
+    });
+  }
   const st = vscode.getState() || {};
   if (st.task === task && st.scroll) window.scrollTo(0, st.scroll);
   window.addEventListener('scroll', () => vscode.setState(Object.assign({}, vscode.getState() || {}, { task, scroll: window.scrollY })));

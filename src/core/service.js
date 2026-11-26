@@ -397,6 +397,25 @@ class Service {
     store.touchEvents({ scope: scope.id, task: task.id });
   }
 
+  /**
+   * New name for a task. The id, branch and worktree folder stay; the SVN changelist name follows the new name
+   * while nothing of the task is in the SVN working copy yet (an existing changelist keeps its name).
+   */
+  renameTask(ref, title) {
+    const { scope, task } = this.resolveTask(ref);
+    const t = String(title || '').replace(/\s+/g, ' ').trim();
+    if (!t) throw new Error('작업 이름이 비어 있습니다.');
+    const old = task.title;
+    if (t === old) return { task, old, changelist: task.changelist };
+    task.title = t;
+    if (task.status === 'active' && !task.landed && !this.pendingCommits().some((m) => m.task === task.id)) {
+      const slug = slugify(t);
+      task.changelist = `svnwt-${slug ? `${task.no}-${slug}` : task.no}`;
+    }
+    this._saveTask(scope, task);
+    return { task, old, changelist: task.changelist };
+  }
+
   listTasks({ scope: scopeRef, includeArchived = false } = {}) {
     const scopes = scopeRef ? [this.resolveScope(scopeRef)] : this.listScopes();
     const res = [];
@@ -1957,6 +1976,57 @@ class Service {
    * Manual "SVN 상태 확인" (nothing checks SVN automatically): for one task, or every task waiting for a commit
    * or marked committed. Committed? (커밋 대기 -> 커밋 완료), wrongly committed? (-> 커밋 대기 / 진행 중), leftovers.
    */
+  // ---------------------------------------------------------------- background SVN checks (extension: svnWatch)
+  /** Cheap, no server: the scope folder's revision in the working copy against the SVN base svnwt has. */
+  async wcRevision(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    const info = await (await this.svn()).info(scope.svnPath);
+    return { scope: scope.id, revision: info.revision, base: scope.revision, changed: info.revision !== scope.revision };
+  }
+
+  /**
+   * Commits on the server that touch the scope folder and are not in the working copy yet. The user's own
+   * commits (svn commit bumps the committed files' revision) count as being there.
+   */
+  async serverCommits(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    const svn = await this.svn();
+    const info = await svn.info(scope.svnPath);
+    const entries = await svn.logAfter(info.url, info.revision);
+    if (!entries.length) return { scope: scope.id, revision: info.revision, pending: [] };
+    const prefix = decodeURIComponent(info.url.slice(info.repoRoot.length)).replace(/\/+$/, '');
+    const local = (p) => (p === prefix ? scope.svnPath : p.startsWith(prefix + '/') ? path.join(scope.svnPath, ...p.slice(prefix.length + 1).split('/')) : null);
+    const all = [...new Set(entries.flatMap((e) => e.paths.map((x) => local(x.path)).filter(Boolean)))].filter((p) => fs.existsSync(p));
+    const rev = new Map((all.length ? await svn.infoMany(all) : []).map((i) => [key(i.path), i.revision]));
+    const applied = (e) => {
+      const mine = e.paths.map((x) => ({ x, l: local(x.path) })).filter((y) => y.l);
+      return mine.length > 0 && mine.every(({ x, l }) => {
+        const r = rev.get(key(l));
+        return x.action === 'D' ? r === undefined || r >= e.revision : r !== undefined && r >= e.revision;
+      });
+    };
+    const pending = entries.filter((e) => !applied(e)).map(({ revision, author, date, msg }) => ({ revision, author, date, msg }));
+    return { scope: scope.id, revision: info.revision, pending };
+  }
+
+  /** Active tasks of a scope based on an older SVN base, and why one cannot be rebased right now. */
+  async tasksBehind(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    const git = await this.git(scope);
+    const res = [];
+    for (const t of this._listTaskFiles(scope).filter((x) => x.status === 'active')) {
+      let behind = 0;
+      try { behind = Number(decode(await git.buf(['rev-list', '--count', `refs/heads/${t.branch}..${BASE_REF}`])).trim()) || 0; } catch (_) { continue; }
+      if (!behind) continue;
+      let wt = null;
+      try { wt = await this._worktreeState(scope, t); } catch (_) { /* none */ }
+      const agent = t.agent && (t.agent.state === 'running' || t.agent.state === 'waiting');
+      const blocked = !wt || !wt.exists ? 'worktree 없음' : wt.rebasing || wt.merging ? 'rebase 충돌 정리 중' : wt.dirty.length ? '커밋되지 않은 변경' : agent ? '에이전트 실행 중' : null;
+      res.push({ id: t.id, no: t.no, title: t.title, behind, blocked });
+    }
+    return res;
+  }
+
   async checkSvnState(ref) {
     const list = ref ? [this.resolveTask(ref).task] : this.listTasks().filter((t) => t.status === 'landed' || t.status === 'committed');
     const changed = [];

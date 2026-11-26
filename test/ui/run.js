@@ -111,7 +111,7 @@ class Driver {
   }
 
   async key(key, { ctrl = false, shift = false, alt = false } = {}) {
-    const codes = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, F1: 112, F7: 118, Backspace: 8 };
+    const codes = { Enter: 13, Escape: 27, Tab: 9, ArrowDown: 40, ArrowUp: 38, ArrowLeft: 37, ArrowRight: 39, F1: 112, F2: 113, F7: 118, Backspace: 8 };
     const modifiers = (alt ? 1 : 0) | (ctrl ? 2 : 0) | (shift ? 8 : 0);
     const kc = codes[key] || key.toUpperCase().charCodeAt(0);
     const base = { modifiers, key, code: key.length === 1 ? 'Key' + key.toUpperCase() : key, windowsVirtualKeyCode: kc, nativeVirtualKeyCode: kc };
@@ -242,7 +242,7 @@ async function setup() {
     'workbench.startupEditor': 'none', 'security.workspace.trust.enabled': false, 'telemetry.telemetryLevel': 'off',
     'update.mode': 'none', 'extensions.autoCheckUpdates': false, 'workbench.tips.enabled': false, 'window.restoreWindows': 'none',
     'workbench.colorTheme': 'Default Dark Modern', 'window.titleBarStyle': 'custom', 'chat.commandCenter.enabled': false,
-    'workbench.secondarySideBar.defaultVisibility': 'hidden', 'files.hotExit': 'off', 'window.dialogStyle': 'custom', 'svnwt.agent.chatSessions': true,
+    'workbench.secondarySideBar.defaultVisibility': 'hidden', 'files.hotExit': 'off', 'window.dialogStyle': 'custom', 'svnwt.agent.chatSessions': true, 'svnwt.svnWatch': false,
     'extensions.ignoreRecommendations': true, 'git.openRepositoryInParentFolders': 'never',
   }, null, 2));
   return { demo, wc: path.join(demo, 'wc'), svc, report };

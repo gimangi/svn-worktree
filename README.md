@@ -17,7 +17,7 @@ SVN working copy (D:\svn\proj)            svnwt 저장 위치 (D:\svn\proj.svnwt
 1. **Git for Windows** 설치: <https://git-scm.com/download/win> 또는 `winget install --id Git.Git -e`
 2. **SVN 명령줄 클라이언트** 설치: TortoiseSVN 설치 시 *command line client tools* 선택
    (`winget install --id TortoiseSVN.TortoiseSVN -e --override "/passive ADDLOCAL=ALL"`)
-3. 확장 설치: `code --install-extension svn-worktree-0.4.10.vsix`
+3. 확장 설치: `code --install-extension svn-worktree-0.5.0.vsix`
    (또는 VS Code 확장 보기 → `...` → *VSIX에서 설치*)
 4. VS Code 재시작
 
@@ -56,7 +56,11 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
 
 **규칙** — 작업 피드백 중 앞으로 항상 지킬 내용("앞으로 주석은 한국어로")은 Copilot 이 `svnwt_rule_add` 로 저장합니다. 피드백이 다른 작업에도 해당할 것 같으면 에이전트가 "규칙에 추가할까요?" 하고 묻고, 그렇다고 할 때만 저장합니다. 사이드바 *규칙* 에 목록과 추가 시각·작업 번호가 보이고, 추가/수정/삭제할 수 있습니다. 규칙은 사용자 지침 파일 `svnwt-rules.instructions.md` 로 모든 Copilot 채팅에 들어갑니다. Copilot 이 읽는 다른 지침 파일(`.github/copilot-instructions.md`, `AGENTS.md` 등)은 *규칙 → 다른 지침 파일* 에 나옵니다.
 
-SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태에 맞춥니다. 에이전트는 SVN working copy 를 건드리지 않고, 끝난 작업을 "리뷰 대기"로 표시합니다.
+**SVN 이 바뀌면 svnwt 가 묻습니다** — 백그라운드에서 SVN 을 확인합니다 (working copy 는 1분마다와 VS Code 로 돌아올 때 `svn info` 한 번, 서버는 10분마다). TortoiseSVN 으로 update 하면 SVN 기준을 조용히 다시 읽고, 진행 중인 작업이 옛 기준이면 "새 기준으로 rebase 할까요?" 하고 묻습니다. 서버에 남이 커밋한 것이 있으면 svn update 할지 묻습니다. 같은 줄을 고쳐 충돌하면 rebase 하지 않고 알려 줍니다. 설정 `svnwt.svnWatch`, `svnwt.svnServerCheckMinutes`. 바로 확인하려면 명령 *SVN 지금 확인*.
+
+**작업 이름 변경** — 트리에서 `F2`, 우클릭 *작업 이름 변경…*, 리뷰 화면 제목 옆 ✎. 브랜치와 worktree 폴더 이름은 그대로입니다.
+
+에이전트는 SVN working copy 를 건드리지 않고, 끝난 작업을 "리뷰 대기"로 표시합니다.
 
 **커밋 방법 설정** (`svnwt.commitTool`): `prepare`(기본, 커밋 준비만) · `tortoise`(TortoiseSVN 커밋 창을 직접 띄움) · `vscode`(확인 창에서 바로 커밋) · `ask`. 어느 방법이든 이 작업의 변경만 커밋됩니다. 리뷰 화면의 *다른 방법으로 커밋…*으로 그때그때 고를 수도 있습니다.
 
@@ -84,6 +88,7 @@ SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태�
 | `svnwt_scope_init` / `svnwt_scope_refresh` | scope 등록 / SVN 기준 다시 읽기 |
 | `svnwt_task_create` / `svnwt_task_list` / `svnwt_task_info` | 작업 생성·조회 |
 | `svnwt_task_commit` / `svnwt_task_diff` / `svnwt_task_sync` | 커밋, diff, 최신 SVN 기준으로 rebase |
+| `svnwt_task_rename` | 작업 이름 변경 |
 | `svnwt_task_review_get` / `svnwt_task_review_submit` | PR 형태 리뷰 |
 | `svnwt_task_attach_screenshots` | UI 테스트 스크린샷·동영상을 리뷰 화면에 첨부 (Playwright 출력 자동 수집) |
 | `svnwt_task_changelist` / `svnwt_task_unland` | 리뷰 대기 표시 / changelist 되돌리기 |
