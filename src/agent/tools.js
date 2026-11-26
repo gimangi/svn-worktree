@@ -222,6 +222,20 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { paths: { type: 'array', items: { type: 'string' } }, title: S('Label'), summary: S('What was tested') } },
     async run(ctx, a) { return JSON.stringify(await ctx.service.attachArtifacts(ctx.task.id, { paths: a.paths, title: a.title, summary: a.summary })); },
   },
+  {
+    name: 'rule',
+    description: 'Lasting rules for every later task (shown in the SVN Worktree sidebar). explicit=true when the user said it is for every task ("앞으로 항상 …", "매번 …", "이런 건 하지 마"): saved at once. explicit=false when their feedback on this task looks like a general preference (style, naming, how to test, things that will come up again): the user is asked with a notification and it is saved only on their yes; you do not wait for the answer. Not for fixes that only concern this task.',
+    inputSchema: { type: 'object', required: ['text'], properties: { text: S('The rule as one short sentence in the language of the user'), why: S('The feedback it comes from'), explicit: { type: 'boolean' } } },
+    async run(ctx, a) {
+      const text = String(a.text || '').trim();
+      if (!text) throw new Error('규칙 내용이 비어 있습니다.');
+      if (ctx.service.listRules().some((r) => r.text.toLowerCase() === text.toLowerCase())) return '이미 있는 규칙입니다.';
+      if (a.explicit) { ctx.service.addRule(text, { why: a.why, task: ctx.task.id, by: 'agent' }); return `규칙에 추가했습니다: ${text}`; }
+      if (!ctx.proposeRule) return '사용자에게 물을 수 없어 저장하지 않았습니다. 필요하면 사용자에게 직접 물어보세요.';
+      ctx.proposeRule(text, a.why);
+      return '사용자에게 규칙에 추가할지 물었습니다 (알림). 답을 기다리지 말고 하던 일을 계속하세요. 요약에 "규칙 추가를 제안했다" 고 한 줄 적으세요.';
+    },
+  },
 ];
 
 /** Short human label for progress / logs. */
@@ -236,6 +250,7 @@ function describe(name, a) {
     case 'run_command': return `실행 ${a.command}`;
     case 'git_commit': return `커밋 "${String(a.message || '').split('\n')[0]}"`;
     case 'svn_changelist': return a.dry_run ? 'SVN 반영 미리보기' : 'SVN changelist 만들기';
+    case 'rule': return a.explicit ? `규칙 추가 "${a.text}"` : `규칙 제안 "${a.text}"`;
     default: return name;
   }
 }

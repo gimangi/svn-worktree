@@ -231,7 +231,9 @@ async function setup() {
   await svc.attachArtifacts(report.id, { title: 'Playwright: report 화면', summary: 'add / mul / ab 행 확인' });
 
   // extension into an isolated profile
-  const vsix = fs.readdirSync(path.join(REPO, 'dist')).filter((f) => f.endsWith('.vsix')).sort().pop();
+  // the vsix of the version being tested (sorting names puts 0.4.10 before 0.4.9)
+  const vsix = `svn-worktree-${require(path.join(REPO, 'package.json')).version}.vsix`;
+  if (!fs.existsSync(path.join(REPO, 'dist', vsix))) throw new Error('not built: dist/' + vsix);
   const cli = path.join(path.dirname(CODE), 'bin', 'code.cmd');
   execFileSync('cmd.exe', ['/d', '/c', cli, '--extensions-dir', path.join(ROOT, 'ext'), '--install-extension', path.join(REPO, 'dist', vsix), '--force'], { stdio: 'ignore' });
   const user = path.join(ROOT, 'ud', 'User');

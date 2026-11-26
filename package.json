@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -308,13 +308,13 @@
         "category": "SVN Worktree",
         "command": "svnwt.prevFile",
         "title": "이전 변경 파일",
-        "icon": "$(arrow-left)"
+        "icon": "$(chevron-left)"
       },
       {
         "category": "SVN Worktree",
         "command": "svnwt.nextFile",
         "title": "다음 변경 파일",
-        "icon": "$(arrow-right)"
+        "icon": "$(chevron-right)"
       },
       {
         "category": "SVN Worktree",
@@ -338,13 +338,13 @@
         "category": "SVN Worktree",
         "command": "svnwt.nextChange",
         "title": "다음 변경 (파일 끝에서는 다음 파일로)",
-        "icon": "$(arrow-small-down)"
+        "icon": "$(arrow-right)"
       },
       {
         "category": "SVN Worktree",
         "command": "svnwt.prevChange",
         "title": "이전 변경 (파일 처음에서는 이전 파일로)",
-        "icon": "$(arrow-small-up)"
+        "icon": "$(arrow-left)"
       },
       {
         "category": "SVN Worktree",
@@ -858,22 +858,22 @@
     "keybindings": [
       {
         "command": "svnwt.nextChange",
-        "key": "f7",
-        "when": "svnwt.diffNav"
-      },
-      {
-        "command": "svnwt.prevChange",
-        "key": "shift+f7",
-        "when": "svnwt.diffNav"
-      },
-      {
-        "command": "svnwt.nextFile",
         "key": "alt+right",
         "when": "svnwt.diffNav"
       },
       {
-        "command": "svnwt.prevFile",
+        "command": "svnwt.prevChange",
         "key": "alt+left",
+        "when": "svnwt.diffNav"
+      },
+      {
+        "command": "svnwt.nextFile",
+        "key": "shift+alt+right",
+        "when": "svnwt.diffNav"
+      },
+      {
+        "command": "svnwt.prevFile",
+        "key": "shift+alt+left",
         "when": "svnwt.diffNav"
       },
       {

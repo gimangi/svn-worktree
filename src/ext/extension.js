@@ -250,14 +250,38 @@ async function offerSideBySide() {
 
 // the diff on screen and its place in the task's file list (이전/다음 파일)
 let diffNav = null;
+const activeTab = () => { try { return vscode.window.tabGroups.activeTabGroup.activeTab; } catch (_) { return null; } };
+/** A task file diff tab (label "name (rN ↔ #no i/n)"): its scope, task number and the two sides. */
+function taskDiffOf(tab) {
+  if (!tab || !isTaskDiffTab(tab)) return null;
+  const m = /↔ #(\d+)/.exec(String(tab.label));
+  const parts = tab.input.original.path.replace(/^\//, '').split('/');
+  return { scopeId: parts[0], no: m[1], rel: parts.slice(2).join('/'), left: tab.input.original.toString(), right: tab.input.modified.toString() };
+}
 function updateDiffNavContext() {
-  let on = false;
-  try {
-    const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    const inp = tab && tab.input;
-    on = !!(diffNav && inp instanceof vscode.TabInputTextDiff && inp.modified.toString() === diffNav.right);
-  } catch (_) { on = false; }
+  const tab = activeTab();
+  const inp = tab && tab.input;
+  // any task diff tab counts, not only the last one opened (an older tab, a tab restored after a reload)
+  const on = !!((diffNav && inp instanceof vscode.TabInputTextDiff && inp.modified.toString() === diffNav.right) || taskDiffOf(tab));
   vscode.commands.executeCommand('setContext', 'svnwt.diffNav', on);
+}
+/** Make diffNav the diff of the active tab (the user may have switched to another diff tab). */
+async function syncDiffNav() {
+  const k = taskDiffOf(activeTab());
+  if (!k || (diffNav && diffNav.right === k.right && diffNav.left === k.left)) return !!diffNav;
+  try {
+    const scope = service.resolveScope(k.scopeId);
+    const all = service.listTasks({ scope: scope.id, includeArchived: true }).filter((t) => String(t.no) === k.no);
+    const task = all.find((t) => t.status !== 'archived') || all[0];
+    if (!task) return false;
+    const info = await service.taskInfo(task.id, { checkSvn: false });
+    const files = info.files || [];
+    let idx = files.findIndex((f) => diffUris(scope, task, info.base, f, info.tip).right.toString() === k.right);
+    if (idx < 0) idx = files.findIndex((f) => (f.from || f.path) === k.rel || f.path === k.rel);
+    if (idx < 0) return false;
+    diffNav = { taskId: task.id, files, index: idx, right: k.right, left: k.left, fresh: false };
+    return true;
+  } catch (_) { return false; }
 }
 
 async function openFileDiff(taskId, f, opts = {}) {
@@ -287,8 +311,9 @@ async function moveDiffToNewWindow() {
   }
 }
 
-/** 이전/다음 파일. edge: put the cursor on that file's 'first' / 'last' change (F7 walking across files). */
+/** 이전/다음 파일. edge: put the cursor on that file's 'first' / 'last' change (change walking across files). */
 async function stepDiff(delta, edge) {
+  await syncDiffNav();
   if (!diffNav || !diffNav.files.length) return;
   const n = diffNav.files.length;
   const i = (diffNav.index + delta + n) % n;
@@ -331,9 +356,9 @@ async function gotoChange(edge) {
   const hunks = await changesOf(diffNav);
   if (ed && hunks.length) revealChange(ed, edge === 'last' ? hunks[hunks.length - 1] : hunks[0]);
 }
-/** 다음/이전 변경 (F7 / Shift+F7): past the last change of a file it continues in the next file. */
+/** 다음/이전 변경 (Alt+→ / Alt+←): past the last change of a file it continues in the next file. */
 async function stepChange(delta) {
-  if (!diffNav) return;
+  if (!(await syncDiffNav())) return;
   const ed = await diffEditor();
   const hunks = await changesOf(diffNav);
   if (ed && hunks.length) {
@@ -641,7 +666,7 @@ function registerCommands(ctx) {
   reg('svnwt.prevFile', () => stepDiff(-1));
   reg('svnwt.nextChange', () => stepChange(1));
   reg('svnwt.prevChange', () => stepChange(-1));
-  reg('svnwt.backToReview', () => { if (diffNav) ReviewPanel.show(ctxApi, diffNav.taskId, {}); });
+  reg('svnwt.backToReview', async () => { if (await syncDiffNav()) ReviewPanel.show(ctxApi, diffNav.taskId, {}); });
   // Keyboard Shortcuts filtered to this extension: shows the keys as the user has them (bound ones first) and lets them change one
   reg('svnwt.showShortcuts', () => vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', `@ext:${ctx.extension.id}`));
   // the choice is saved in the setting: the next diff opens the same way
@@ -652,7 +677,7 @@ function registerCommands(ctx) {
   });
   reg('svnwt.diffToReview', async () => {
     await setDiffPlacement('review');
-    if (!diffNav) return;
+    if (!(await syncDiffNav())) return;
     const { taskId, files, index } = diffNav;
     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     await openFileDiff(taskId, files[index]);

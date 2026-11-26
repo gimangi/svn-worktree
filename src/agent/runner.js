@@ -10,8 +10,9 @@ const fs = require('fs');
 const { TOOLS, runTool, describe } = require('./tools');
 
 const MAX_STEPS = 40;
+const safeRules = (service) => { try { return service.listRules(); } catch (_) { return []; } };
 
-function systemPrompt(scope, task) {
+function systemPrompt(scope, task, rules = []) {
   return [
     'You are "svnwt", a coding agent that works on exactly ONE task in an isolated git worktree that mirrors a folder of an SVN working copy.',
     `Task #${task.no}: ${task.title}`,
@@ -28,6 +29,10 @@ function systemPrompt(scope, task) {
     '- If something is unclear or risky, stop and ask the user instead of guessing.',
     '- End with a short summary: what changed (files), how it was verified, what is left.',
     "- Reply in the user's language (Korean if the user writes Korean).",
+    '- Feedback from the user: when it is meant for every task ("앞으로 항상 …", "매번 …"), save it with the rule tool (explicit=true). When feedback on this task looks like a general preference that will come up again (style, naming, how to test), apply it here and call the rule tool with explicit=false: the user is asked whether to keep it as a rule. Do not propose fixes that only concern this task, and propose the same thing only once.',
+    rules.length ? '' : null,
+    rules.length ? "The user's lasting rules (follow them):" : null,
+    ...rules.map((r) => `- ${r.text}`),
   ].filter((l) => l !== null).join('\n');
 }
 
@@ -118,11 +123,12 @@ class AgentRunner {
         this.service.setAgentState(task.id, 'waiting', { waitingFor: cmd });
         try { return await this.opts.approveCommand(task, cmd); } finally { this.service.setAgentState(task.id, 'running', { waitingFor: null }); }
       },
+      proposeRule: this.opts.proposeRule ? (text, why) => this.opts.proposeRule(task, text, why) : null,
     };
 
     // our own message records -> vscode messages on every request (lets us compact old tool output)
     const records = [
-      { role: 'user', parts: [{ text: systemPrompt(scope, task) }] },
+      { role: 'user', parts: [{ text: systemPrompt(scope, task, safeRules(this.service)) }] },
       { role: 'assistant', parts: [{ text: '알겠습니다. 이 작업의 worktree 안에서만 작업하겠습니다.' }] },
       ...prior.map((e) => ({ role: e.role, parts: [{ text: e.text }] })),
       { role: 'user', parts: [{ text: prompt }] },

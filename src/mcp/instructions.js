@@ -37,8 +37,11 @@ the same way an agent works on a git branch/worktree and opens a pull request.
 10. Report results to the user in the user's language (Korean if they write Korean).
 11. Follow the user's lasting rules (\`rules\` in the \`svnwt_status\` result). When the user gives feedback meant for
    every future task ("앞으로 항상 …", "매번 …", "이런 건 하지 마"), save it with \`svnwt_rule_add\` (one short
-   sentence) and say so. Do not write instruction files (.github/*.md, AGENTS.md, *.instructions.md) inside a
-   worktree for this: they would be committed to SVN with the task.
+   sentence) and say so. When feedback on the current task looks like a general preference that will come up again
+   (style, naming, how to test, review habits), apply it, then ask once: "이 내용을 규칙에 추가할까요? — <one
+   sentence>". Call \`svnwt_rule_add\` only after the user says yes; do not ask about fixes that only concern this
+   task, and do not ask again about something they declined. Do not write instruction files (.github/*.md,
+   AGENTS.md, *.instructions.md) inside a worktree for this: they would be committed to SVN with the task.
 `;
 
 module.exports = { AGENT_INSTRUCTIONS };

@@ -108,7 +108,7 @@ const TOOLS = [
   },
   {
     name: 'svnwt_rule_add',
-    description: 'Save a lasting rule the user gave ("앞으로 항상 …", "매번 …", "이런 건 하지 마"). Rules apply to every later task and the user sees them in the SVN Worktree sidebar. Use this instead of writing instruction files (.github/*.md, AGENTS.md) inside a worktree: those would be committed to SVN with the task.',
+    description: 'Save a lasting rule the user gave ("앞으로 항상 …", "매번 …", "이런 건 하지 마"). For feedback that only looks general, ask the user "규칙에 추가할까요?" first and call this only after their yes. Rules apply to every later task and the user sees them in the SVN Worktree sidebar. Use this instead of writing instruction files (.github/*.md, AGENTS.md) inside a worktree: those would be committed to SVN with the task.',
     inputSchema: {
       type: 'object', required: ['text'], properties: {
         text: str('The rule, one short sentence in the user\'s language.'), why: str('Optional: what the user said that led to it.'),

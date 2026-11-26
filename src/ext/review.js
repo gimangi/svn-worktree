@@ -290,8 +290,8 @@ class ReviewPanel {
         <div class="meta muted">worktree 는 삭제되었습니다 · <a href="#" data-cmd="purge" class="danger">기록 삭제</a></div>
       </header>
       ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
-      ${info.history ? `<section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>
-      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면 · <a href="#" data-cmd="shortcuts">단축키 보기·바꾸기</a></div><table class="files">${fileRows}</table>` : '<p class="muted">없음</p>'}</section>` : ''}
+      ${info.history ? `<section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 Alt+→ / Alt+← 다음·이전 변경 (파일 끝에서 다음 파일로) · Alt+Shift+→ / Alt+Shift+← 파일 · Esc 리뷰 화면 · <a href="#" data-cmd="shortcuts">단축키 보기·바꾸기</a></div><table class="files">${fileRows}</table>` : '<p class="muted">없음</p>'}</section>
+      <section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>` : ''}
       ${(this.session || []).length ? this.renderAgent(t) : ''}
       <section><h2>리뷰</h2>${reviewHtml}</section>
       ${runs.length ? `<section><h2>테스트 화면 <span class="muted">(${runs.length}회)</span></h2>${this.renderRuns(runs, info.tip)}</section>` : ''}
@@ -341,10 +341,10 @@ class ReviewPanel {
       ${this.renderNext(info, files)}
       ${this.renderAgent(t)}
       ${t.description ? `<section><h2>설명</h2><div class="body">${esc(t.description)}</div></section>` : ''}
-      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 F7 / Shift+F7 다음·이전 변경 (파일을 넘어감) · Alt+→ / Alt+← 파일 · Esc 리뷰 화면 · <a href="#" data-cmd="shortcuts">단축키 보기·바꾸기</a></div><table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
+      <section><h2>변경된 파일 <span class="muted">(${files.length})</span></h2>${files.length ? `<div class="muted keys">↑↓ 이동 · Enter 열기 · diff 에서 Alt+→ / Alt+← 다음·이전 변경 (파일 끝에서 다음 파일로) · Alt+Shift+→ / Alt+Shift+← 파일 · Esc 리뷰 화면 · <a href="#" data-cmd="shortcuts">단축키 보기·바꾸기</a></div><table class="files">${fileRows}</table>` : '<p class="muted">아직 커밋된 변경이 없습니다.</p>'}</section>
+      <section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>
       <section><h2>테스트 화면${runs.length ? ` <span class="muted">(${runs.length}회)</span>` : ''}</h2>${this.renderRuns(runs, info.tip)}</section>
       <section><h2>리뷰</h2>${reviewHtml}</section>
-      <section><h2>커밋 <span class="muted">(${info.commits.length})</span></h2>${commitRows ? `<ol class="commits">${commitRows}</ol>` : '<p class="muted">없음</p>'}</section>
       <section><h2>SVN 커밋 메시지</h2>
         <textarea id="msg" rows="7">${esc(message)}</textarea>
         <div class="muted" id="msgState">SVN 커밋 시 이 메시지를 사용합니다. 수정하면 자동 저장됩니다.</div>

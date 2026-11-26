@@ -17,7 +17,7 @@ SVN working copy (D:\svn\proj)            svnwt 저장 위치 (D:\svn\proj.svnwt
 1. **Git for Windows** 설치: <https://git-scm.com/download/win> 또는 `winget install --id Git.Git -e`
 2. **SVN 명령줄 클라이언트** 설치: TortoiseSVN 설치 시 *command line client tools* 선택
    (`winget install --id TortoiseSVN.TortoiseSVN -e --override "/passive ADDLOCAL=ALL"`)
-3. 확장 설치: `code --install-extension svn-worktree-0.4.9.vsix`
+3. 확장 설치: `code --install-extension svn-worktree-0.4.10.vsix`
    (또는 VS Code 확장 보기 → `...` → *VSIX에서 설치*)
 4. VS Code 재시작
 
@@ -52,9 +52,9 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
 
 **일부만 고치거나 되돌리기** — 리뷰 화면에서 파일을 누르면 리뷰 화면이 있는 탭 그룹에 diff 가 전체 폭으로 열립니다 (양쪽 비교). 제목줄의 *이전/다음 변경 파일* 로 넘겨 보고 *리뷰 화면* 으로 돌아갑니다. *새 창으로 분리* 를 누르면 diff 전용 창에서 보고, 그 방식이 저장되어 다음에도 새 창에 열립니다 (*리뷰 화면 탭으로* 로 되돌림, 설정 `svnwt.diffPlacement`). 오른쪽은 worktree 의 실제 파일이라 바로 고칠 수 있고, 변경 블록 사이의 화살표(*Revert Block*)로 그 부분만 SVN 기준으로 되돌릴 수 있습니다. 특정 부분을 에이전트에게 묻거나 고치게 하려면 그 줄을 선택하고 우클릭 → *이 부분 질문/수정 지시…* (파일·줄 위치, 선택한 코드, 그 부분 diff 가 같이 전달됨). 저장한 변경은 *커밋 준비* 때 함께 올라갑니다 (git 커밋 여부를 물어봄).
 
-**키보드로 리뷰** — 리뷰 화면: `↑` `↓` (또는 `j` `k`) 로 파일·커밋 행 이동, `Enter` 로 열기. diff: `F7` / `Shift+F7` 다음·이전 변경 (파일 끝에서 다음 파일로 이어짐), `Alt+→` / `Alt+←` 다음·이전 파일, `Esc` 리뷰 화면으로 (보던 행에 그대로), `Alt+Q` 선택한 부분 질문/수정 지시. diff 제목줄 버튼에 마우스를 올리면 툴팁에 키가 보입니다. 전체 목록은 리뷰 화면 제목줄의 키보드 버튼이나 명령 *SVN Worktree: 단축키 보기·바꾸기* 로 열고, 거기서 바로 바꿀 수 있습니다.
+**키보드로 리뷰** — 리뷰 화면: `↑` `↓` (또는 `j` `k`) 로 파일·커밋 행 이동, `Enter` 로 열기. diff: `Alt+→` / `Alt+←` 다음·이전 변경 (파일 끝에서 다음 파일로 이어짐), `Alt+Shift+→` / `Alt+Shift+←` 다음·이전 파일, `Esc` 리뷰 화면으로 (보던 행에 그대로), `Alt+Q` 선택한 부분 질문/수정 지시. diff 제목줄 버튼에 마우스를 올리면 툴팁에 키가 보입니다. 전체 목록은 리뷰 화면 제목줄의 키보드 버튼이나 명령 *SVN Worktree: 단축키 보기·바꾸기* 로 열고, 거기서 바로 바꿀 수 있습니다.
 
-**규칙** — 작업 피드백 중 앞으로 항상 지킬 내용("앞으로 주석은 한국어로")은 Copilot 이 `svnwt_rule_add` 로 저장합니다. 사이드바 *규칙* 에 목록과 추가 시각·작업 번호가 보이고, 추가/수정/삭제할 수 있습니다. 규칙은 사용자 지침 파일 `svnwt-rules.instructions.md` 로 모든 Copilot 채팅에 들어갑니다. Copilot 이 읽는 다른 지침 파일(`.github/copilot-instructions.md`, `AGENTS.md` 등)은 *규칙 → 다른 지침 파일* 에 나옵니다.
+**규칙** — 작업 피드백 중 앞으로 항상 지킬 내용("앞으로 주석은 한국어로")은 Copilot 이 `svnwt_rule_add` 로 저장합니다. 피드백이 다른 작업에도 해당할 것 같으면 에이전트가 "규칙에 추가할까요?" 하고 묻고, 그렇다고 할 때만 저장합니다. 사이드바 *규칙* 에 목록과 추가 시각·작업 번호가 보이고, 추가/수정/삭제할 수 있습니다. 규칙은 사용자 지침 파일 `svnwt-rules.instructions.md` 로 모든 Copilot 채팅에 들어갑니다. Copilot 이 읽는 다른 지침 파일(`.github/copilot-instructions.md`, `AGENTS.md` 등)은 *규칙 → 다른 지침 파일* 에 나옵니다.
 
 SVN이 갱신되면 *최신 SVN 기준으로 rebase*로 작업을 최신 상태에 맞춥니다. 에이전트는 SVN working copy 를 건드리지 않고, 끝난 작업을 "리뷰 대기"로 표시합니다.
 

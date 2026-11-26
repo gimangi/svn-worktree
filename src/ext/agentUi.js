@@ -28,9 +28,20 @@ async function setupAgent(ctx, d) {
     return !!a;
   };
 
+  // feedback that looks general: asked, not awaited (the agent keeps working); saved only on the user's yes
+  const proposeRule = (task, text, why) => {
+    vscode.window.showInformationMessage(`작업 #${task.no} 피드백을 규칙에 추가할까요? 앞으로 모든 작업에 적용됩니다.
+"${text}"`, '규칙에 추가', '아니요').then((a) => {
+      if (a !== '규칙에 추가') return;
+      try { service.addRule(text, { why, task: task.id, by: 'agent' }); vscode.window.setStatusBarMessage(`규칙 추가: ${text}`, 4000); }
+      catch (e) { vscode.window.showErrorMessage(`규칙을 저장하지 못했습니다: ${e.message}`); }
+    });
+  };
+
   const runner = new AgentRunner(vscode, service, {
     gitExe: tools.git ? tools.git.path : 'git',
     approveCommand,
+    proposeRule,
     newFileEol: cfg().get('agent.newFileEol') === 'lf' ? '\n' : '\r\n',
   });
 

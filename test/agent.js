@@ -146,6 +146,22 @@ async function main() {
   assert(!runner.isRunning(task.id));
   ok('one run per task at a time');
 
+  // feedback: explicit lasting rule saved at once; general-looking feedback only proposed (saved on the user's yes)
+  const proposed = [];
+  const runner2 = new AgentRunner(vs, s, { gitExe: t.git.path, approveCommand: async () => true, proposeRule: (tk, text) => proposed.push([tk.id, text]) });
+  const m2 = scriptedModel([
+    { calls: [['rule', { text: '앞으로 주석은 한국어로 쓴다', explicit: true }], ['rule', { text: '함수 이름은 동사로 시작한다', why: '이 함수 이름 바꿔줘' }], ['rule', { text: '앞으로 주석은 한국어로 쓴다', explicit: true }]] },
+    { text: '반영했습니다.' },
+  ]);
+  await runner2.run({ taskId: task.id, prompt: '함수 이름을 동사로 바꿔줘. 그리고 앞으로 주석은 한국어로', model: m2 });
+  const ruleTexts = s.listRules().map((r) => r.text);
+  assert(ruleTexts.includes('앞으로 주석은 한국어로 쓴다') && !ruleTexts.includes('함수 이름은 동사로 시작한다'), JSON.stringify(ruleTexts));
+  assert.deepStrictEqual(proposed, [[task.id, '함수 이름은 동사로 시작한다']]);
+  assert(/물었습니다/.test(m2.seen[1]) && /이미 있는/.test(m2.seen[2]), JSON.stringify(m2.seen));
+  const { systemPrompt } = require('../src/agent/runner');
+  assert(systemPrompt(scope, task, s.listRules()).includes('- 앞으로 주석은 한국어로 쓴다'));
+  ok('rule tool: explicit saved, general feedback only proposed, duplicates skipped, rules in the prompt');
+
   console.log(`\n# all ${n} agent checks passed`);
   try { execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Remove-Item -LiteralPath $env:T -Recurse -Force'], { env: { ...process.env, T: ROOT }, stdio: 'ignore' }); } catch (_) { /* ignore */ }
 }

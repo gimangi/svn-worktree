@@ -63,9 +63,11 @@ async function scenarios(d, ctx) {
     return { note: `제목: ${title}` };
   });
   await step({ scenario: S2, action: '리뷰 화면 상단 — 상태 상자', expect: '상태에 맞는 다음 단계와 주 버튼 1개 (커밋 대기 → "SVN 커밋…")' }, async () => {
-    const r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent + (b.classList.contains('primary') ? '*' : '')) })`, 8000, P.report);
+    const r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent + (b.classList.contains('primary') ? '*' : '')), h2: [...doc.querySelectorAll('h2')].map((h) => h.textContent.replace(/\\s*\\(.*$/, '').trim()) })`, 8000, P.report);
     assert(r.buttons.filter((b) => b.endsWith('*')).length === 1, 'primary buttons: ' + r.buttons.join(','));
-    return { note: `${r.title} · 버튼: ${r.buttons.join(', ')} (*=주 버튼)` };
+    const at = (name) => r.h2.findIndex((x) => x.startsWith(name));
+    assert(at('변경된 파일') >= 0 && at('변경된 파일') + 1 === at('커밋') && at('커밋') + 1 === at('테스트 화면'), 'section order: ' + r.h2.join(', '));
+    return { note: `${r.title} · 버튼: ${r.buttons.join(', ')} (*=주 버튼) · 섹션: ${r.h2.join(', ')}` };
   });
   await step({ scenario: S2, action: '테스트 화면 갤러리 (Playwright 2회 실행)', expect: '최신(통과) 펼침, 이전(실패) 접힘, 테스트 이름으로 표시' }, async () => {
     const r = await d.webview(`(doc) => { [...doc.querySelectorAll('h2')].find((h) => h.textContent.includes('테스트 화면')).scrollIntoView(); return [...doc.querySelectorAll('details.run')].map((x) => x.querySelector('summary').textContent.replace(/\\s+/g, ' ').trim() + (x.open ? ' [펼침]' : '') + ' :: ' + [...x.querySelectorAll('figcaption')].map((f) => f.textContent.trim()).join(', ')); }`, 8000, P.report);
@@ -146,23 +148,23 @@ async function scenarios(d, ctx) {
     assert(btns.length >= 4, JSON.stringify(btns));
     return { note: `탭 그룹: ${g.tabs.join(' | ')} · 버튼: ${btns.join(', ')}` };
   });
-  await step({ scenario: S2, action: 'diff 제목줄 버튼 툴팁', expect: '이전/다음 변경 · 이전/다음 파일 · 리뷰 화면 버튼에 단축키가 함께 표시됨 (F7, Shift+F7, Alt+←/→)' }, async () => {
+  await step({ scenario: S2, action: 'diff 제목줄 버튼 툴팁', expect: '이전/다음 변경 · 이전/다음 파일 · 리뷰 화면 버튼에 단축키가 함께 표시됨 (Alt+←/→, Alt+Shift+←/→, Esc)' }, async () => {
     const labels = await d.eval(`[...document.querySelectorAll('.editor-group-container .editor-actions .action-label')].map((a) => a.getAttribute('aria-label') || a.getAttribute('title') || '').filter(Boolean)`);
     const find = (re) => labels.find((x) => re.test(x)) || '';
-    const want = [[/^다음 변경 \(/, /\(F7\)$/], [/^이전 변경 \(/, /\(Shift\+F7\)$/], [/^다음 변경 파일/, /\(Alt\+/], [/^이전 변경 파일/, /\(Alt\+/]];
+    const want = [[/^다음 변경 \(/, /\(Alt\+RightArrow\)$/], [/^이전 변경 \(/, /\(Alt\+LeftArrow\)$/], [/^다음 변경 파일/, /\(Shift\+Alt\+RightArrow\)$/], [/^이전 변경 파일/, /\(Shift\+Alt\+LeftArrow\)$/]];
     for (const [name, key] of want) assert(key.test(find(name)), `no key in tooltip ${name}: ${JSON.stringify(labels)}`);
     return { note: labels.filter((x) => /변경|리뷰 화면/.test(x)).join(' · ') };
   });
-  await step({ scenario: S2, action: 'F7 → F7 → Shift+F7', expect: '첫 변경으로, 파일 끝에서는 다음 파일의 첫 변경으로, 거꾸로는 이전 파일의 마지막 변경으로' }, async () => {
-    await d.key('F7');
+  await step({ scenario: S2, action: 'Alt+→ → Alt+→ → Alt+←', expect: '첫 변경으로, 파일 끝에서는 다음 파일의 첫 변경으로, 거꾸로는 이전 파일의 마지막 변경으로' }, async () => {
+    await d.key('ArrowRight', { alt: true });
     await sleep(500);
     const l1 = await cursorLine();
     assert(l1 > 1, 'cursor did not move to the change: Ln ' + l1);
-    await d.key('F7');
+    await d.key('ArrowRight', { alt: true });
     const g2 = await activeDiff(/2\/3/);
     await sleep(500);
     const l2 = await cursorLine();
-    await d.key('F7', { shift: true });
+    await d.key('ArrowLeft', { alt: true });
     const g3 = await activeDiff(/main\.cpp .*1\/3/);
     await sleep(500);
     const l3 = await cursorLine();
@@ -170,8 +172,8 @@ async function scenarios(d, ctx) {
     assert(g3.tabs.filter((t) => /↔/.test(t)).length === 1, 'one diff tab: ' + g3.tabs.join(' | '));
     return { note: `main.cpp Ln ${l1} → ${g2.active} Ln ${l2} → ${g3.active} Ln ${l3}` };
   });
-  await step({ scenario: S2, action: 'Alt+→ (다음 파일) → Esc', expect: '같은 탭에서 다음 파일 diff, Esc 로 리뷰 화면' }, async () => {
-    await d.key('ArrowRight', { alt: true });
+  await step({ scenario: S2, action: 'Alt+Shift+→ (다음 파일) → Esc', expect: '같은 탭에서 다음 파일 diff, Esc 로 리뷰 화면' }, async () => {
+    await d.key('ArrowRight', { alt: true, shift: true });
     const g = await activeDiff(/2\/3/);
     // Esc goes back only from a focused diff (editorTextFocus): wait until the new diff has the focus
     for (let i = 0; i < 20 && !(await d.eval(`!!(document.activeElement && document.activeElement.closest('.monaco-diff-editor'))`)); i++) await sleep(250);
@@ -182,16 +184,16 @@ async function scenarios(d, ctx) {
     assert(now.some((x) => /add sub function/.test(x.active) && !/↔/.test(x.active)), 'review not active: ' + JSON.stringify(now.map((x) => x.active)));
     return { note: `${g.active} → Esc → ${now.find((x) => /add sub function/.test(x.active)).active}` };
   });
-  await step({ scenario: S2, action: '리뷰 화면 안내 줄의 "단축키 보기·바꾸기" (제목줄 키보드 버튼과 같음)', expect: '바로 가기 키 화면이 svnwt 명령으로 걸러져 열리고 F7·Alt+→ 등이 보임' }, async () => {
+  await step({ scenario: S2, action: '리뷰 화면 안내 줄의 "단축키 보기·바꾸기" (제목줄 키보드 버튼과 같음)', expect: '바로 가기 키 화면이 svnwt 명령으로 걸러져 열리고 Alt+→ 등이 보임' }, async () => {
     const hasBtn = await d.eval(`[...document.querySelectorAll('.editor-group-container .editor-actions .action-label')].some((a) => /단축키 보기/.test(a.getAttribute('aria-label') || ''))`);
     assert(hasBtn, 'no keyboard button in the review title bar');
     await d.webview(`(doc) => { const a = doc.querySelector('a[data-cmd="shortcuts"]'); if (!a) return null; a.click(); return true; }`, 8000, P.sub);
-    await d.waitFor(`(() => { const e = document.querySelector('.keybindings-editor'); return !!e && /다음 변경/.test(e.innerText) && /F7/.test(e.innerText); })()`, 10000, 'keybindings editor');
+    await d.waitFor(`(() => { const e = document.querySelector('.keybindings-editor'); return !!e && /다음 변경/.test(e.innerText) && /RightArrow/.test(e.innerText); })()`, 10000, 'keybindings editor');
     const txt = await d.eval(`document.querySelector('.keybindings-editor').innerText`);
     assert(/@ext:svnwt\.svn-worktree/.test(txt) || !/파일 열기/.test(txt), 'not filtered to svnwt');
     await d.key('w', { ctrl: true });
     for (let i = 0; i < 20 && await d.eval(`!!document.querySelector('.keybindings-editor')`); i++) await sleep(250);
-    const rows = txt.split('\n').filter((l) => /F7|Alt\+|Escape/.test(l)).slice(0, 6);
+    const rows = txt.split('\n').filter((l) => /Arrow|Escape|변경/.test(l)).slice(0, 12);
     return { note: rows.join(' | ') };
   });
   await step({ scenario: S2, action: '리뷰 화면에서 ↓ ↓ Enter', expect: '파일 행을 키보드로 골라 diff 열기 (두 번째 파일)' }, async () => {
@@ -231,6 +233,38 @@ async function scenarios(d, ctx) {
     await d.key('Escape');
     await sleep(600);
     return { note: `탭 그룹: ${g.tabs.join(' | ')}` };
+  });
+  const tabAt = (re) => d.eval(`(() => { const t = [...document.querySelectorAll('.editor-group-container .tab')].find((x) => ${re}.test(x.getAttribute('aria-label') || '')); if (!t) return null; t.scrollIntoView({ block: 'nearest', inline: 'nearest' }); const b = t.getBoundingClientRect(); const c = (t.closest('.tabs-and-actions-container .monaco-scrollable-element') || t.closest('.tabs-container')).getBoundingClientRect(); return { x: Math.min(Math.max(b.left + b.width / 2, c.left + 4), c.right - 4), y: b.top + b.height / 2, inView: b.left >= c.left - 1 && b.right <= c.right + 1 }; })()`);
+  const focusDiff = async () => { for (let i = 0; i < 20 && !(await d.eval(`!!(document.activeElement && document.activeElement.closest('.monaco-diff-editor'))`)); i++) await sleep(250); await sleep(300); };
+  await step({ scenario: S2, action: 'diff 탭을 고정해 두고 다른 파일 diff 를 연 뒤, 고정한 탭으로 돌아가 Alt+Shift+→', expect: '마지막에 연 diff 가 아니어도 그 탭의 다음 파일로 (열린 탭 사이를 오가지 않음)' }, async () => {
+    await d.webview(`(doc) => { doc.querySelector('tr.file').click(); return true; }`, 8000, P.sub);
+    await activeDiff(/main\.cpp .*1\/3/);
+    const t1 = await tabAt('/^main\\.cpp \\(r/');
+    assert(t1, 'no main.cpp tab');
+    await d.mouse('mousePressed', t1.x, t1.y, 'left', 1); await d.mouse('mouseReleased', t1.x, t1.y, 'left', 1);
+    await d.mouse('mousePressed', t1.x, t1.y, 'left', 2); await d.mouse('mouseReleased', t1.x, t1.y, 'left', 2); // double-click: keep the tab
+    await sleep(500);
+    await clickTitleButton('/^리뷰 화면으로/');
+    await sleep(600);
+    await d.webview(`(doc) => { doc.querySelectorAll('tr.file')[2].click(); return true; }`, 8000, P.sub);
+    await activeDiff(/mathutil\.h .*3\/3/);
+    const t2 = await tabAt('/^main\\.cpp \\(r/');
+    assert(t2 && t2.inView, 'kept main.cpp tab not visible: ' + JSON.stringify(t2) + ' ' + JSON.stringify((await groupsNow()).map((x) => x.tabs)));
+    await d.mouse('mousePressed', t2.x, t2.y); await d.mouse('mouseReleased', t2.x, t2.y);
+    await activeDiff(/main\.cpp .*1\/3/);
+    await focusDiff();
+    await d.key('ArrowRight', { alt: true, shift: true });
+    const g = await activeDiff(/mathutil\.cpp .*2\/3/);
+    // clean up: close the kept main.cpp tab and the preview diff
+    for (const re of ['/^main\\.cpp \\(r/', '/^mathutil\\.(cpp|h) \\(r/']) {
+      const t = await tabAt(re);
+      if (!t) continue;
+      await d.mouse('mousePressed', t.x, t.y); await d.mouse('mouseReleased', t.x, t.y);
+      await sleep(300);
+      await d.key('w', { ctrl: true });
+      await sleep(400);
+    }
+    return { note: `고정 탭 main.cpp → Alt+Shift+→ → ${g.active} · 탭: ${g.tabs.join(' | ')}` };
   });
 
 
