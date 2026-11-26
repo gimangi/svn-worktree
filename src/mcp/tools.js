@@ -23,6 +23,7 @@ const TOOLS = [
       const locks = svc.locks().map((l) => ({ scope: l.scope, lock: l.name, op: l.op, pid: l.pid, runningSec: Math.round(l.since / 1000), holderAlive: l.alive, stale: l.stale }));
       return {
         ok: true, git: envInfo.git.version, svn: envInfo.svn.version, locations, scopes, tasks, locks,
+        rules: svc.listRules().map((r) => r.text),
         hint: scopes.length === 0
           ? 'No scope yet: ask the user which SVN folder to manage, then call svnwt_scope_init.'
           : 'Create a task with svnwt_task_create (or reuse an active one) and edit only inside its workPath.',
@@ -104,6 +105,23 @@ const TOOLS = [
       },
     },
     handler: (svc, a) => svc.syncTask(a.task, { strategy: a.strategy || 'rebase', svnUpdate: !!a.svnUpdate, cont: !!a.cont, abort: !!a.abort }),
+  },
+  {
+    name: 'svnwt_rule_add',
+    description: 'Save a lasting rule the user gave ("앞으로 항상 …", "매번 …", "이런 건 하지 마"). Rules apply to every later task and the user sees them in the SVN Worktree sidebar. Use this instead of writing instruction files (.github/*.md, AGENTS.md) inside a worktree: those would be committed to SVN with the task.',
+    inputSchema: {
+      type: 'object', required: ['text'], properties: {
+        text: str('The rule, one short sentence in the user\'s language.'), why: str('Optional: what the user said that led to it.'),
+        task: str('Task the feedback was given on (id or number).'),
+      },
+    },
+    handler: (svc, a) => svc.addRule(a.text, { why: a.why, task: a.task, by: 'copilot' }),
+  },
+  {
+    name: 'svnwt_rule_list',
+    description: 'List the lasting rules the user gave (also returned by svnwt_status). Follow them in every task.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: (svc) => ({ rules: svc.listRules() }),
   },
   {
     name: 'svnwt_task_changelist',

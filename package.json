@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -68,6 +68,30 @@
         "title": "SVN 상태 확인",
         "category": "SVN Worktree",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "svnwt.addRule",
+        "title": "규칙 추가",
+        "category": "SVN Worktree",
+        "icon": "$(add)"
+      },
+      {
+        "command": "svnwt.editRule",
+        "title": "규칙 수정",
+        "category": "SVN Worktree",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "svnwt.removeRule",
+        "title": "규칙 삭제",
+        "category": "SVN Worktree",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "svnwt.openRulesFile",
+        "title": "규칙 지침 파일 열기",
+        "category": "SVN Worktree",
+        "icon": "$(go-to-file)"
       },
       {
         "command": "svnwt.initScope",
@@ -249,6 +273,18 @@
         "command": "svnwt.locks",
         "title": "잠금 상태 확인/해제",
         "category": "SVN Worktree"
+      },
+      {
+        "command": "svnwt.askAboutSelection",
+        "title": "이 부분 질문/수정 지시…",
+        "category": "SVN Worktree",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "svnwt.refreshPrepare",
+        "title": "커밋 준비 갱신 (새 커밋 반영)",
+        "category": "SVN Worktree",
+        "icon": "$(sync)"
       }
     ],
     "menus": {
@@ -305,6 +341,26 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "svnwt.addRule",
+          "when": "view == svnwt.tasks && viewItem == rules",
+          "group": "inline@0"
+        },
+        {
+          "command": "svnwt.openRulesFile",
+          "when": "view == svnwt.tasks && viewItem == rules",
+          "group": "inline@1"
+        },
+        {
+          "command": "svnwt.editRule",
+          "when": "view == svnwt.tasks && viewItem == rule",
+          "group": "inline@0"
+        },
+        {
+          "command": "svnwt.removeRule",
+          "when": "view == svnwt.tasks && viewItem == rule",
+          "group": "inline@1"
+        },
         {
           "command": "svnwt.agent.newTask",
           "when": "view == svnwt.tasks && viewItem == scope",
@@ -440,6 +496,14 @@
       ],
       "commandPalette": [
         {
+          "command": "svnwt.editRule",
+          "when": "false"
+        },
+        {
+          "command": "svnwt.removeRule",
+          "when": "false"
+        },
+        {
           "command": "svnwt.addToWorkspace",
           "when": "false"
         },
@@ -466,6 +530,24 @@
         {
           "command": "svnwt.agent.stop",
           "when": "false"
+        },
+        {
+          "command": "svnwt.askAboutSelection",
+          "when": "svnwt.inTask"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "svnwt.askAboutSelection",
+          "when": "svnwt.inTask",
+          "group": "navigation@0"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "svnwt.askAboutSelection",
+          "when": "svnwt.inTask",
+          "group": "navigation@0"
         }
       ]
     },
@@ -545,6 +627,21 @@
           "type": "boolean",
           "default": false,
           "description": "(실험) VS Code Chat 세션 목록에 svnwt 작업을 표시. VS Code 제안 API 가 필요해 \"SVN Worktree: Chat 세션 목록에 작업 표시 (실험)\" 명령으로 켭니다."
+        },
+        "svnwt.reviewAskTarget": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "copilot",
+            "background"
+          ],
+          "enumDescriptions": [
+            "Copilot Chat 에 \"@svnwt /continue <번호>\" 로 보냄: 그 작업의 에이전트 세션에서 이어서 진행 (채팅에 보임)",
+            "Copilot Chat 기본 에이전트에 작업 번호·worktree 와 함께 보냄 (MCP 도구 사용)",
+            "백그라운드 에이전트 세션에 보냄 (리뷰 화면의 에이전트 세션에 보임)"
+          ],
+          "default": "chat",
+          "description": "\"이 부분 질문/수정 지시\" 요청을 보낼 곳. 선택한 코드, 파일·줄 위치, 그 부분의 작업 diff 가 함께 들어갑니다."
         }
       }
     },

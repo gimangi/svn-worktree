@@ -35,6 +35,10 @@ the same way an agent works on a git branch/worktree and opens a pull request.
 9. If the SVN base moved (other commits), call \`svnwt_task_sync\` to rebase the task on the latest SVN state;
    resolve conflicts inside the worktree, then \`svnwt_task_sync\` with cont=true.
 10. Report results to the user in the user's language (Korean if they write Korean).
+11. Follow the user's lasting rules (\`rules\` in the \`svnwt_status\` result). When the user gives feedback meant for
+   every future task ("앞으로 항상 …", "매번 …", "이런 건 하지 마"), save it with \`svnwt_rule_add\` (one short
+   sentence) and say so. Do not write instruction files (.github/*.md, AGENTS.md, *.instructions.md) inside a
+   worktree for this: they would be committed to SVN with the task.
 `;
 
 module.exports = { AGENT_INSTRUCTIONS };

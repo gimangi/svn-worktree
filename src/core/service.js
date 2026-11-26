@@ -12,7 +12,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { decode } = require('./proc');
+const proc = require('./proc');
+const rules = require('./rules');
+const { decode } = proc;
 const { Git } = require('./git');
 const { Svn } = require('./svn');
 const env = require('./env');
@@ -541,6 +543,21 @@ class Service {
     if (!tip) throw new Error(`브랜치가 없습니다: ${task.branch}`);
     const base = (await git.mergeBase(BASE_REF, tip)) || task.baseCommit;
     return { git, tip, base };
+  }
+
+  /** Files one git commit of the task changed (against its parent). */
+  async commitFiles(ref, sha) {
+    const { scope, task } = this.resolveTask(ref);
+    const { git, tip, base } = await this._range(scope, task);
+    const full = await git.revParse(String(sha));
+    if (!full) throw new Error(`커밋을 찾을 수 없습니다: ${sha}`);
+    const inTask = decode(await git.buf(['rev-list', `${base}..${tip}`])).split('\n').map((l) => l.trim()).includes(full);
+    if (!inTask) throw new Error(`#${task.no} 작업의 커밋이 아닙니다: ${String(sha).slice(0, 8)}`);
+    const parent = (await git.revParse(`${full}^`)) || base;
+    const subject = decode(await git.buf(['log', '-1', '--format=%s', full])).trim();
+    const stats = await git.numstat(parent, full);
+    const files = (await git.nameStatus(parent, full)).map((f) => Object.assign({}, f, stats[f.path] || {}));
+    return { scope: scope.id, task: task.id, sha: full, parent, subject, files };
   }
 
   async taskInfo(ref, { checkSvn = true } = {}) {
@@ -1285,43 +1302,90 @@ class Service {
    * Only one thing can stop it: the task changes the same lines as something committed to SVN after the task
    * started (rebase in the worktree first).
    */
-  async stashCommit(ref) {
+  // ---------------------------------------------------------------- rules ("앞으로 항상 …" the user told an agent)
+  listRules() { return rules.list(); }
+
+  addRule(text, { why, task, by } = {}) {
+    let t = null;
+    let scope = null;
+    if (task) { try { ({ task: t, scope } = this.resolveTask(task)); } catch (_) { /* rule without a task */ } }
+    return rules.add({ text, why, by, scope: scope && scope.id, task: t && t.id, taskNo: t && t.no, taskTitle: t && t.title });
+  }
+
+  updateRule(id, text) { return rules.update(id, text); }
+
+  removeRule(id) { return rules.remove(id); }
+
+  /** Progress line for the extension's output channel (no-op without one). */
+  _step(msg) {
+    for (const f of [this.onLog, this.onProgress]) { if (f) { try { f(msg); } catch (_) { /* ignore */ } } }
+  }
+
+  /**
+   * @param {string} ref
+   * @param {{token?: {cancelled: boolean}}} [opts] set token.cancelled (and kill running commands) to stop: what was
+   *   set aside is put back
+   */
+  stashCommit(ref, opts) { return proc.trace(() => this._stashCommit(ref, opts), '[커밋 준비]'); }
+
+  async _stashCommit(ref, { token } = {}) {
     const { scope, task } = this.resolveTask(ref);
     if (!['active', 'landed'].includes(task.status)) throw new Error('진행 중인 작업만 커밋할 수 있습니다.');
     this._assertNoCommitInProgress(scope);
+    const t0 = Date.now();
+    const step = (msg) => this._step(`[커밋 준비 #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    const cancelled = () => !!(token && token.cancelled);
+    const check = () => { if (cancelled()) { const e = new Error('커밋 준비를 취소했습니다.'); e.cancelled = true; throw e; } };
+    step(`시작: ${task.title} (상태 ${task.status})`);
     const svn = await this.svn();
     const git = await this.git(scope);
-    const root = scope.wcRoot || scope.svnPath;
+    const root = scope.svnPath; // only the scope: svn status of a whole large checkout is what made this slow
     const wt = await this._worktreeState(scope, task);
     if (wt.rebasing || wt.merging) throw new Error('worktree 에서 rebase 가 진행 중입니다. 먼저 끝내세요.');
-    if (wt.dirty.length) await this.commitTask(task.id, `${task.title} (SVN 커밋 전 자동 커밋)`);
+    if (wt.dirty.length) { step(`worktree 의 커밋 안 된 변경 ${wt.dirty.length}개를 git 커밋`); await this.commitTask(task.id, `${task.title} (SVN 커밋 전 자동 커밋)`); }
     const { tip, base } = await this._range(scope, task);
     const changes = await git.nameStatus(base, tip);
     if (!changes.length) throw new Error('커밋할 변경이 없습니다.');
+    step(`작업 변경 파일 ${changes.length}개. working copy 상태 읽는 중: ${root}`);
+    check();
     const taskAbs = new Set();
     for (const c of changes) { taskAbs.add(key(fromPosix(scope.svnPath, c.path))); if (c.from) taskAbs.add(key(fromPosix(scope.svnPath, c.from))); }
 
     const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
     const st = await svn.status(root);
     const dir = store.ensureDir(path.join(scope.home, 'stash', `${now().replace(/[:.]/g, '-')}-${task.id}`));
+    const toSave = st.filter((e) => CHANGED.includes(e.item) || e.changelist || (e.item === 'unversioned' && taskAbs.has(key(e.path))));
+    step(`svn status ${st.length}개 항목, 빼 둘 변경/changelist ${toSave.length}개. 보관본 저장: ${dir}`);
     const entries = [];
     let n = 0;
-    for (const e of st) {
-      const changed = CHANGED.includes(e.item);
-      const strayInTaskPath = e.item === 'unversioned' && taskAbs.has(key(e.path)); // would collide with a file the task adds
-      if (!changed && !e.changelist && !strayInTaskPath) continue;
-      let isDir = false;
-      try { isDir = fs.statSync(e.path).isDirectory(); } catch (_) { /* deleted */ }
-      const ent = { path: e.path, item: strayInTaskPath ? 'unversioned' : e.item, changelist: e.changelist || null, isDir };
-      if ((changed || strayInTaskPath) && !isDir) {
-        const cur = readFileOrNull(e.path);
-        if (cur !== null) { ent.copy = path.join(dir, String(n++)); fs.writeFileSync(ent.copy, cur); }
-        const baseContent = ['added', 'unversioned'].includes(ent.item) ? null : await svn.catBase(e.path);
-        if (baseContent !== null) { ent.base = path.join(dir, String(n++)); fs.writeFileSync(ent.base, baseContent); }
+    try {
+      for (const e of st) {
+        if (cancelled()) break;
+        const changed = CHANGED.includes(e.item);
+        const strayInTaskPath = e.item === 'unversioned' && taskAbs.has(key(e.path)); // would collide with a file the task adds
+        if (!changed && !e.changelist && !strayInTaskPath) continue;
+        let isDir = false;
+        try { isDir = fs.statSync(e.path).isDirectory(); } catch (_) { /* deleted */ }
+        const ent = { path: e.path, item: strayInTaskPath ? 'unversioned' : e.item, changelist: e.changelist || null, isDir };
+        if ((changed || strayInTaskPath) && !isDir) {
+          const cur = readFileOrNull(e.path);
+          if (cur !== null) { ent.copy = path.join(dir, String(n++)); fs.writeFileSync(ent.copy, cur); }
+          const baseContent = ['added', 'unversioned'].includes(ent.item) ? null : await svn.catBase(e.path);
+          if (baseContent !== null) { ent.base = path.join(dir, String(n++)); fs.writeFileSync(ent.base, baseContent); }
+        }
+        entries.push(ent);
+        if (entries.length % 50 === 0) step(`보관본 저장 ${entries.length}/${toSave.length}`);
       }
-      entries.push(ent);
+      check();
+      step('working copy 전체 diff 저장 (추가 보관본)');
+      try { const d = await svn.raw(['diff', root]); if (d.code === 0 && d.stdout.length) fs.writeFileSync(path.join(dir, 'working-copy.diff'), d.stdout); } catch (_) { /* extra copy only */ }
+      check();
+    } catch (e) {
+      // nothing in the working copy was touched yet
+      fs.rmSync(dir, { recursive: true, force: true });
+      step(e.cancelled ? '취소함 (working copy 는 바뀌지 않음)' : `실패 (working copy 는 바뀌지 않음): ${e.message}`);
+      throw e;
     }
-    try { const d = await svn.raw(['diff', root]); if (d.code === 0 && d.stdout.length) fs.writeFileSync(path.join(dir, 'working-copy.diff'), d.stdout); } catch (_) { /* extra copy only */ }
     // phase "stashing" until this task is on the working copy: if VS Code stops in between, the next start puts
     // everything back (see recoverCommits / the extension's activation)
     const marker = { kind: 'stash', phase: 'stashing', task: task.id, at: now(), pid: process.pid, external: true, stash: dir, entries, prevStatus: task.status, prevLanded: task.landed || null };
@@ -1330,6 +1394,7 @@ class Service {
     try {
       const changed = entries.filter((e) => CHANGED.includes(e.item));
       const tops = changed.filter((e) => !changed.some((o) => o !== e && o.isDir && isInside(e.path, o.path) && key(o.path) !== key(e.path)));
+      step(`다른 변경 ${tops.length}개 revert, changelist 해제`);
       if (tops.length) await svn.withTargets(['revert', '--depth', 'infinity'], tops.map((e) => e.path), { okCodes: [1] });
       for (const e of entries.filter((x) => !x.isDir && ['added', 'unversioned'].includes(x.item))) { try { fs.unlinkSync(e.path); } catch (_) { /* gone */ } }
       for (const e of changed.filter((x) => x.isDir && x.item === 'added').sort((a, b) => b.path.length - a.path.length)) {
@@ -1342,35 +1407,141 @@ class Service {
       // can restart VS Code's extension host in the middle of this)
       task.landed = null;
       this._saveTask(scope, task);
+      check();
+      step('이 작업 변경을 working copy 에 반영');
       const r = await this.landTask(task.id, { inStash: true });
+      check();
       if (!r.ok) {
+        step(`반영 불가 (${(r.blocked || []).map((b) => b.path).join(', ')}): 원래 상태로 되돌리는 중`);
         await this._endStash(scope, this.resolveTask(task.id).task, marker);
         return { ok: false, task: task.id, blocked: r.blocked, needsRebase: !!r.needsRebase || (r.blocked || []).some((b) => b.needsRebase), errors: r.errors };
       }
       const fresh = this.resolveTask(task.id).task;
-      // only this task is changed in the working copy now: no changelist, so TortoiseSVN checks every file
-      const inOwn = (await svn.status(root)).filter((e) => e.changelist === fresh.changelist).map((e) => e.path);
-      if (inOwn.length) await svn.withTargets(['changelist', '--remove'], inOwn, { okCodes: [1] });
+      // only this task is changed in the working copy now; its files go in the task's changelist so the TortoiseSVN
+      // commit dialog shows them as one group (checked by default), apart from unversioned files
+      await this._ownChangelist(scope, fresh);
+      check();
+      step('커밋 판정용 revision 기록');
       marker.revs = await this._lastChangedRevs(scope, fresh.landed.files);
+      check();
       marker.phase = 'ready';
       store.writeJson(this._markerFile(scope), marker);
       const help = await this.commitHelp(scope, fresh);
+      step(`완료: 이 작업 파일 ${fresh.landed.files.length}개만 working copy 에 있음`);
       return {
         ok: true, task: task.id, files: fresh.landed.files, setAside: entries.filter((e) => CHANGED.includes(e.item) || e.item === 'unversioned').length,
         stash: dir, targets: help.targets, messageFile: help.messageFile, message: help.suggestedMessage,
       };
     } catch (e) {
-      try { await this._endStash(scope, this.resolveTask(task.id).task, marker); } catch (_) { /* reported below */ }
-      throw new Error(`커밋 준비 실패 (원래 상태로 되돌렸습니다, 보관본: ${dir}): ${e.message}`);
+      step(`${e.cancelled ? '취소함' : `실패: ${e.message}`}. 원래 상태로 되돌리는 중`);
+      let restoreErr = null;
+      try { await this._endStash(scope, this.resolveTask(task.id).task, marker); } catch (er) { restoreErr = er; }
+      step(restoreErr ? `되돌리기 실패: ${restoreErr.message} (보관본: ${dir})` : '되돌리기 완료');
+      if (restoreErr) throw new Error(`커밋 준비가 중간에 멈췄고 되돌리기도 실패했습니다. 보관본: ${dir} (${restoreErr.message})`);
+      const err = new Error(e.cancelled ? '커밋 준비를 취소했습니다. working copy 는 원래대로 되돌렸습니다.' : `커밋 준비 실패 (원래 상태로 되돌렸습니다, 보관본: ${dir}): ${e.message}`);
+      err.cancelled = !!e.cancelled;
+      throw err;
     }
   }
 
   /** Take the task back out of the working copy and put everything that was set aside back. */
+  /**
+   * While 커밋 준비 is on, every changed file of the task goes in the task's changelist (landTask leaves a file that
+   * another task's record also lists in that task's changelist; here the other tasks are set aside).
+   */
+  async _ownChangelist(scope, task) {
+    if (!task.landed) return;
+    const svn = await this.svn();
+    const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'merged'];
+    const mine = new Set(task.landed.files.map((f) => key(fromPosix(scope.svnPath, f))));
+    const isDir = (p) => { try { return fs.statSync(p).isDirectory(); } catch (_) { return false; } };
+    const add = (await svn.status(scope.svnPath))
+      .filter((e) => mine.has(key(e.path)) && CHANGED.includes(e.item) && e.changelist !== task.changelist && !isDir(e.path))
+      .map((e) => e.path);
+    if (add.length) await svn.withTargets(['changelist', task.changelist], add, { okCodes: [1] });
+  }
+
+  /** New git commits after 커밋 준비 (an agent kept working): true when the working copy holds an older tip. */
+  async prepareIsStale(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const m = this._commitMarker(scope);
+    if (!m || m.kind !== 'stash' || m.task !== task.id || m.phase !== 'ready' || !task.landed) return false;
+    const git = await this.git(scope);
+    const tip = await git.revParse('refs/heads/' + task.branch);
+    return !!tip && tip !== task.landed.commit;
+  }
+
+  /**
+   * Put the task's newest commits on the working copy while 커밋 준비 stays on: only this task's files are taken out and
+   * applied again; what was set aside stays set aside.
+   */
+  refreshStashCommit(ref, opts) { return proc.trace(() => this._refreshStashCommit(ref, opts), '[커밋 준비 갱신]'); }
+
+  async _refreshStashCommit(ref, { token } = {}) {
+    const { scope, task } = this.resolveTask(ref);
+    const m = this._commitMarker(scope);
+    if (!m || m.kind !== 'stash' || m.task !== task.id || m.phase !== 'ready') throw new Error('이 작업은 커밋 준비 중이 아닙니다.');
+    const t0 = Date.now();
+    const step = (msg) => this._step(`[커밋 준비 갱신 #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    const check = () => { if (token && token.cancelled) { const e = new Error('커밋 준비 갱신을 취소했습니다.'); e.cancelled = true; throw e; } };
+    const wt = await this._worktreeState(scope, task);
+    if (wt.rebasing || wt.merging) throw new Error('worktree 에서 rebase 가 진행 중입니다. 먼저 끝내세요.');
+    if (wt.dirty.length) { step(`worktree 의 커밋 안 된 변경 ${wt.dirty.length}개를 git 커밋`); await this.commitTask(task.id, `${task.title} (SVN 커밋 전 자동 커밋)`); }
+    step('SVN 에 이미 커밋됐는지 확인');
+    if (await this.commitDone(task.id)) return { ok: false, committed: true, task: task.id };
+    check();
+    const svn = await this.svn();
+    const root = scope.svnPath;
+    const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
+    const cur = this.resolveTask(task.id).task;
+    const saved = new Set(m.entries.map((e) => key(e.path)));
+    step('이전 반영분 빼기');
+    m.phase = 'stashing'; // interrupted from here on: the next start restores everything (like an interrupted 커밋 준비)
+    delete m.revs;
+    store.writeJson(this._markerFile(scope), m);
+    const mine = new Set([...(cur.landed ? cur.landed.files : []), ...(cur.landed && cur.landed.dirs ? cur.landed.dirs : [])].map((f) => key(fromPosix(scope.svnPath, f))));
+    const st = await svn.status(root);
+    const pend = st.filter((e) => mine.has(key(e.path)) && CHANGED.includes(e.item));
+    if (pend.length) await svn.withTargets(['revert', '--depth', 'infinity'], pend.map((e) => e.path), { okCodes: [1] });
+    for (const e of pend.filter((x) => x.item === 'added' && !saved.has(key(x.path)))) { try { fs.rmSync(e.path, { recursive: true, force: true }); } catch (_) { /* ignore */ } }
+    const cl = (await svn.status(root)).filter((e) => e.changelist === task.changelist).map((e) => e.path);
+    if (cl.length) await svn.withTargets(['changelist', '--remove'], cl, { okCodes: [1] });
+    cur.landed = null;
+    this._saveTask(scope, cur);
+    try {
+      check();
+      step('새 커밋까지 working copy 에 반영');
+      const r = await this.landTask(task.id, { inStash: true });
+      if (!r.ok) {
+        step('반영 불가: 커밋 준비를 모두 되돌리는 중');
+        await this._endStash(scope, this.resolveTask(task.id).task, m);
+        return { ok: false, task: task.id, blocked: r.blocked, needsRebase: !!r.needsRebase || (r.blocked || []).some((b) => b.needsRebase), errors: r.errors };
+      }
+      const fresh = this.resolveTask(task.id).task;
+      await this._ownChangelist(scope, fresh);
+      m.revs = await this._lastChangedRevs(scope, fresh.landed.files);
+      m.phase = 'ready';
+      store.writeJson(this._markerFile(scope), m);
+      store.touchEvents({ scope: scope.id, task: task.id, commit: 'refreshed' });
+      const help = await this.commitHelp(scope, fresh);
+      step(`완료: 이 작업 파일 ${fresh.landed.files.length}개`);
+      return { ok: true, task: task.id, files: fresh.landed.files, messageFile: help.messageFile, message: help.suggestedMessage };
+    } catch (e) {
+      step(`${e.cancelled ? '취소함' : `실패: ${e.message}`}. 커밋 준비를 모두 되돌리는 중`);
+      try { await this._endStash(scope, this.resolveTask(task.id).task, m); } catch (_) { /* reported below */ }
+      const err = new Error(e.cancelled ? '커밋 준비 갱신을 취소했습니다. working copy 는 커밋 준비 전으로 되돌렸습니다.' : `커밋 준비 갱신 실패 (커밋 준비 전으로 되돌렸습니다, 보관본: ${m.stash}): ${e.message}`);
+      err.cancelled = !!e.cancelled;
+      throw err;
+    }
+  }
+
   async _endStash(scope, task, m) {
     const svn = await this.svn();
-    const root = scope.wcRoot || scope.svnPath;
+    const root = scope.svnPath;
     const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
     let committed = false;
+    const t0 = Date.now();
+    const step = (msg) => this._step(`[커밋 정리 #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     if (!m.revs) {
       // stopped before the task was fully applied: take back whatever of it is in the working copy
       const mine = await this._taskPaths(scope, task).catch(() => new Set());
@@ -1382,7 +1553,9 @@ class Service {
       const cl0 = (await svn.status(root)).filter((e) => e.changelist === task.changelist && !saved.has(key(e.path))).map((e) => e.path);
       if (cl0.length) await svn.withTargets(['changelist', '--remove'], cl0, { okCodes: [1] });
     } else if (task.landed) {
+      step('커밋 여부 확인');
       committed = await this.commitDone(task.id);
+      step(committed ? '커밋됨: 남은 작업 변경 정리' : '커밋 안 됨: 작업 변경 되돌리기');
       // what is left of the task (cancelled, or files left unchecked) goes: it is all in git
       const st = await svn.status(root);
       const mine = new Set(task.landed.files.map((f) => key(fromPosix(scope.svnPath, f))));
@@ -1394,6 +1567,7 @@ class Service {
       if (cl.length) await svn.withTargets(['changelist', '--remove'], cl, { okCodes: [1] });
     }
     // put back what was set aside
+    step(`빼 두었던 변경 ${m.entries.length}개 복구`);
     const kept = [];
     const toAdd = [];
     const toDelete = [];
@@ -1425,6 +1599,7 @@ class Service {
       if (e.item === 'added') toAdd.push(e.path);
     }
     const errors = [];
+    step(`svn add ${toAdd.length}개, delete ${toDelete.length}개, changelist 복원`);
     if (toAdd.length) { try { await svn.withTargets(['add', '--force', '--parents', '--depth', 'empty'], toAdd); } catch (err) { errors.push(err.message); } }
     if (toDelete.length) { try { await svn.withTargets(['delete', '--force'], toDelete); } catch (err) { errors.push(err.message); } }
     const groups = new Map();
@@ -1622,7 +1797,7 @@ class Service {
       if (await this._changeInBase(scope, task, f)) { task.commitVerified = true; this._saveTask(scope, task); return task.status; }
     }
     const svn = await this.svn();
-    const inWc = (await svn.status(scope.wcRoot || scope.svnPath)).some((e) => e.changelist === task.changelist);
+    const inWc = (await svn.status(scope.svnPath)).some((e) => e.changelist === task.changelist);
     task.status = inWc ? 'landed' : 'active';
     if (!inWc) task.landed = null;
     delete task.committedAt;
@@ -1701,7 +1876,12 @@ class Service {
     const { scope, task } = this.resolveTask(ref);
     const m = this._commitMarker(scope);
     if (!m || m.task !== task.id) return { task: task.id, committed: task.status === 'committed', restored: 0 };
-    if (m.kind === 'stash') return this._endStash(scope, task, m);
+    if (m.kind === 'stash') {
+      this._step(`[커밋 정리 #${task.no}] 시작 (커밋 판정, 남은 변경 정리, 빼 두었던 변경 복구)`);
+      const r = await proc.trace(() => this._endStash(scope, task, m), '[커밋 정리]');
+      this._step(`[커밋 정리 #${task.no}] 완료: ${r.committed ? '커밋됨' : '취소'}, 복구 ${r.restored}개${r.kept && r.kept.length ? `, 보관본에 남김 ${r.kept.length}개` : ''}`);
+      return r;
+    }
     const errors = [];
     let restored = 0;
     for (const f of m.files) {

@@ -88,9 +88,11 @@ class ReviewPanel {
         case 'agentChat': return vscode.commands.executeCommand('svnwt.agent.openChat', this.taskId);
         case 'commitChoose': return vscode.commands.executeCommand('svnwt.commitSvnChoose', this.taskId);
         case 'cancelCommit': return vscode.commands.executeCommand('svnwt.cancelCommit', this.taskId);
+        case 'refreshPrepare': return vscode.commands.executeCommand('svnwt.refreshPrepare', this.taskId);
         case 'openChanges': return vscode.commands.executeCommand('svnwt.openChanges', this.taskId);
-        case 'openDiff': return vscode.commands.executeCommand('svnwt.openFileDiff', this.taskId, m.file);
-        case 'openFile': return c.openTaskFile(this.taskId, m.file, m.line);
+        case 'openDiff': return vscode.commands.executeCommand('svnwt.openFileDiff', this.taskId, m.file, { beside: true });
+        case 'openCommit': return vscode.commands.executeCommand('svnwt.openCommit', this.taskId, m.sha);
+        case 'openFile': return c.openTaskFile(this.taskId, m.file, m.line, { beside: true });
         case 'askCopilot': return vscode.commands.executeCommand('svnwt.askCopilotReview', this.taskId);
         case 'land': return vscode.commands.executeCommand('svnwt.land', this.taskId);
         case 'unland': return vscode.commands.executeCommand('svnwt.unland', this.taskId);
@@ -213,6 +215,10 @@ class ReviewPanel {
         ? 'TortoiseSVN 커밋 창을 열어 커밋하세요. 이 작업의 파일만 있고, 커밋 메시지는 클립보드에 있습니다. 빼 둔 다른 변경은 커밋이 끝나면 돌아옵니다.'
         : '커밋 진행 중입니다.';
       buttons = [['cancelCommit', '커밋 취소 (되돌리기)']];
+      if (t.landed && info.tip !== t.landed.commit) {
+        notes.push(['warn', '커밋 준비 후 새 git 커밋이 생겼습니다. working copy 에는 아직 이전 내용입니다.']);
+        buttons = [['refreshPrepare', '커밋 준비 갱신', 'primary'], ['cancelCommit', '커밋 취소 (되돌리기)']];
+      }
     } else if (t.status === 'landed') {
       const external = ['prepare', 'external', undefined, ''].includes(vscode.workspace.getConfiguration('svnwt').get('commitTool'));
       const shared = Object.keys((t.landed && t.landed.shared) || {});
@@ -283,7 +289,7 @@ class ReviewPanel {
       </tr>`).join('');
 
     const commitRows = (info.commits || []).map((c) => `
-      <li><code>${esc(c.sha.slice(0, 8))}</code> ${esc(c.subject)} <span class="muted">— ${esc(c.author)}, ${esc(new Date(c.date).toLocaleString())}</span></li>`).join('');
+      <li class="commit" data-sha="${esc(c.sha)}" title="이 커밋의 변경 보기"><code>${esc(c.sha.slice(0, 8))}</code> ${esc(c.subject)} <span class="muted">— ${esc(c.author)}, ${esc(new Date(c.date).toLocaleString())}</span></li>`).join('');
 
     const reviewHtml = reviews.slice().reverse().map((r) => {
       const [label, cls] = VERDICT[r.verdict] || [r.verdict, 'info'];
@@ -371,6 +377,8 @@ class ReviewPanel {
   .st-A { color: var(--vscode-gitDecoration-addedResourceForeground); } .st-M { color: var(--vscode-gitDecoration-modifiedResourceForeground); }
   .st-D { color: var(--vscode-gitDecoration-deletedResourceForeground); } .st-R { color: var(--vscode-gitDecoration-renamedResourceForeground); }
   ol.commits li { margin: 3px 0; }
+  ol.commits li.commit { cursor: pointer; }
+  ol.commits li.commit:hover { background: var(--vscode-list-hoverBackground); }
   .review { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 8px 12px; margin: 10px 0; }
   .rh { margin-bottom: 6px; }
   .body { white-space: pre-wrap; line-height: 1.45; }
@@ -389,6 +397,7 @@ class ReviewPanel {
   const vscode = acquireVsCodeApi();
   document.querySelectorAll('button[data-cmd]').forEach((b) => b.addEventListener('click', () => vscode.postMessage({ cmd: b.dataset.cmd })));
   document.querySelectorAll('tr.file').forEach((r) => r.addEventListener('click', () => vscode.postMessage({ cmd: 'openDiff', file: JSON.parse(r.dataset.file) })));
+  document.querySelectorAll('li.commit').forEach((li) => li.addEventListener('click', () => vscode.postMessage({ cmd: 'openCommit', sha: li.dataset.sha })));
   document.querySelectorAll('a.loc').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); vscode.postMessage({ cmd: 'openFile', file: a.dataset.file, line: Number(a.dataset.line) || 0 }); }));
   document.querySelectorAll('figure.shot').forEach((f) => f.addEventListener('click', (e) => { if (e.target.tagName === 'VIDEO') return; vscode.postMessage({ cmd: 'openArtifact', file: f.dataset.file }); }));
   document.querySelectorAll('a[data-cmd]').forEach((a) => a.addEventListener('click', (e) => { e.preventDefault(); vscode.postMessage({ cmd: a.dataset.cmd }); }));

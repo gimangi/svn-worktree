@@ -255,6 +255,7 @@ function writeFakeModel() {
     { calls: [['git_commit', { message: 'README: 에이전트 설명 추가' }]], delayMs: 800 },
     { text: '완료: app/README.md 에 설명을 추가하고 커밋했습니다. (빌드 확인: build-ok)', delayMs: 500 },
     { text: '추가 지시 확인: 남은 작업은 없습니다.', delayMs: 500 },
+    { text: '선택한 줄 확인: 제목 줄입니다. 고칠 것은 없습니다.', delayMs: 500 },
   ], null, 1));
   return f;
 }

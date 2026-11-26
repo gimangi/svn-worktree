@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { Service, isInside } = require('../core/service');
 const env = require('../core/env');
+const proc = require('../core/proc');
 const store = require('../core/store');
 const { TaskTree } = require('./tree');
 const { GitFs, SCHEME } = require('./gitfs');
@@ -70,6 +71,39 @@ function refreshAll() {
 
 async function withProgress(title, fn) {
   return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title, cancellable: false }, fn);
+}
+
+/** Like withProgress, with a cancel button: cancelling sets token.cancelled and kills the running svn/git command. */
+async function withCancel(title, fn) {
+  return withSteps(title, true, fn);
+}
+
+/**
+ * Progress notification that shows the current step and, when one runs over 2 s, the svn/git command it waits on
+ * ("svn status … 12초째"). Steps come from service._step; commands from proc.inFlight.
+ */
+function withSteps(title, cancellable, fn) {
+  return vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title, cancellable }, (progress, ct) => {
+    const token = { cancelled: false };
+    const t0 = Date.now();
+    let step = '';
+    const prev = service.onProgress;
+    service.onProgress = (m) => { step = String(m).replace(/^\[[^\]]+\]\s*/, '').replace(/\s*\(\+[\d.]+s\)$/, ''); show(); };
+    const show = () => {
+      const slow = proc.inFlight().sort((a, b) => b.ms - a.ms)[0];
+      const cmd = slow && slow.ms > 2000 ? ` — ${slow.line.length > 70 ? `${slow.line.slice(0, 70)}…` : slow.line} ${Math.round(slow.ms / 1000)}초째` : '';
+      progress.report({ message: `${Math.round((Date.now() - t0) / 1000)}초 · ${step || '시작'}${cmd}` });
+    };
+    const tick = setInterval(show, 1000);
+    if (cancellable) {
+      ct.onCancellationRequested(() => {
+        token.cancelled = true;
+        log(`${title} 취소 요청: 실행 중인 명령 ${proc.killAll()}개 중지, 원래 상태로 되돌리는 중`);
+        vscode.window.showInformationMessage('취소하는 중입니다. 빼 두었던 변경을 되돌린 뒤 끝납니다.');
+      });
+    }
+    return Promise.resolve().then(() => fn(token)).finally(() => { clearInterval(tick); service.onProgress = prev; });
+  });
 }
 
 // ------------------------------------------------------------------ workspace folders
@@ -158,11 +192,23 @@ function diffUris(scope, task, base, f) {
   return { left, right };
 }
 
-async function openFileDiff(taskId, f) {
+// Opened from the review panel (or while it is the active tab): show the file next to it in one reused preview tab,
+// so the panel stays visible and the next click replaces the previous diff
+function reviewIsActive() {
+  try {
+    const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    return !!(tab && tab.input instanceof vscode.TabInputWebview && /svnwt.review/.test(tab.input.viewType));
+  } catch (_) { return false; }
+}
+function showOptions(beside) {
+  return beside || reviewIsActive() ? { preview: true, preserveFocus: true, viewColumn: vscode.ViewColumn.Beside } : { preview: true };
+}
+
+async function openFileDiff(taskId, f, opts = {}) {
   const { scope, task } = service.resolveTask(taskId);
   const info = await service.taskInfo(task.id, { checkSvn: false });
   const { left, right } = diffUris(scope, task, info.base, f);
-  await vscode.commands.executeCommand('vscode.diff', left, right, `${path.posix.basename(f.path)} (r${scope.revision} ↔ #${task.no})`, { preview: true });
+  await vscode.commands.executeCommand('vscode.diff', left, right, `${path.posix.basename(f.path)} (r${scope.revision} ↔ #${task.no})`, showOptions(opts.beside));
 }
 
 async function openChanges(taskId) {
@@ -176,12 +222,137 @@ async function openChanges(taskId) {
   await vscode.commands.executeCommand('vscode.changes', `#${task.no} ${task.title} — 변경 사항 (${info.files.length})`, resources);
 }
 
-async function openTaskFile(taskId, rel, line) {
+/** One git commit of a task as a multi-file diff (its parent ↔ the commit). */
+async function openCommit(taskId, sha) {
+  const { scope, task } = service.resolveTask(taskId);
+  const c = await service.commitFiles(task.id, sha);
+  if (!c.files.length) { vscode.window.showInformationMessage(`${c.sha.slice(0, 8)}: 바뀐 파일이 없습니다.`); return; }
+  const resources = c.files.map((f) => {
+    const left = f.status === 'A' ? GitFs.uri(scope.id, 'empty', f.path) : GitFs.uri(scope.id, c.parent, f.from || f.path);
+    const right = f.status === 'D' ? GitFs.uri(scope.id, 'empty', f.path) : GitFs.uri(scope.id, c.sha, f.path);
+    return [GitFs.uri(scope.id, c.sha, f.path), left, right];
+  });
+  await vscode.commands.executeCommand('vscode.changes', `#${task.no} ${c.sha.slice(0, 8)} ${c.subject} (${c.files.length})`, resources);
+}
+
+// ------------------------------------------------------------------ ask about a selection (review → agent)
+/** Task + path (relative to the scope) of the file in an editor: a worktree file, the SVN-side of a diff, or an SVN file. */
+async function taskOfEditor(editor) {
+  const uri = editor.document.uri;
+  if (uri.scheme === 'file') {
+    const m = service.mapPath(uri.fsPath);
+    if (m.from === 'worktree') return { task: service.resolveTask(m.task).task, rel: m.rel.replace(/\\/g, '/') };
+    if (m.from === 'svn') {
+      const cands = m.worktrees.filter((w) => ['active', 'landed'].includes(w.status));
+      if (!cands.length) return null;
+      const t = cands.length === 1 ? cands[0] : await vscode.window.showQuickPick(cands.map((w) => ({ label: w.title, description: w.status, w })), { title: '어느 작업에 지시할까요?' }).then((x) => x && x.w);
+      return t ? { task: service.resolveTask(t.task).task, rel: m.rel.replace(/\\/g, '/') } : null;
+    }
+    return null;
+  }
+  if (uri.scheme === SCHEME) {
+    const parts = uri.path.replace(/^\//, '').split('/');
+    const rel = parts.slice(2).join('/');
+    const cands = service.listTasks({ scope: parts[0] }).filter((t) => ['active', 'landed'].includes(t.status));
+    const active = vscode.window.tabGroups.activeTabGroup.activeTab;
+    const label = active && active.label ? String(active.label) : '';
+    const byTitle = cands.find((t) => label.includes(`#${t.no})`) || label.includes(`#${t.no} `));
+    const t = byTitle || (cands.length === 1 ? cands[0] : await vscode.window.showQuickPick(cands.map((x) => ({ label: `#${x.no} ${x.title}`, x })), { title: '어느 작업에 지시할까요?' }).then((x) => x && x.x));
+    return t ? { task: t, rel } : null;
+  }
+  return null;
+}
+
+/** The task's diff hunks of one file that touch lines [from, to] (new-file line numbers). */
+async function hunksAround(taskId, rel, from, to) {
+  let diff = '';
+  try { diff = (await service.diffTask(taskId, { file: rel, uncommitted: true, maxChars: 200000 })).diff; } catch (_) { return ''; }
+  const lines = diff.split('\n');
+  const out = [];
+  let cur = null;
+  const flush = () => { if (cur && cur.hit) out.push(...cur.lines); cur = null; };
+  for (const l of lines) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
+    if (h) {
+      flush();
+      const a = Number(h[1]);
+      const b = a + Math.max(Number(h[2] === undefined ? 1 : h[2]), 1) - 1;
+      cur = { lines: [l], hit: a <= to + 3 && b >= from - 3 };
+    } else if (cur) cur.lines.push(l);
+  }
+  flush();
+  return out.slice(0, 160).join('\n');
+}
+
+async function askAboutSelection() {
+  const ed = vscode.window.activeTextEditor;
+  if (!ed) { vscode.window.showInformationMessage('질문할 코드를 편집기나 diff 에서 선택하세요.'); return; }
+  const where = await taskOfEditor(ed);
+  if (!where) { vscode.window.showInformationMessage('SVN Worktree 작업의 파일이 아닙니다. 리뷰 화면에서 파일 diff 를 연 뒤 선택하세요.'); return; }
+  const { task, rel } = where;
+  const sel = ed.selection;
+  const from = sel.start.line + 1;
+  const to = sel.isEmpty ? from : sel.end.line + (sel.end.character === 0 && sel.end.line > sel.start.line ? 0 : 1);
+  const code = sel.isEmpty ? ed.document.lineAt(sel.start.line).text : ed.document.getText(sel);
+  const side = ed.document.uri.scheme === SCHEME ? ' (SVN 기준 쪽)' : '';
+  const text = await vscode.window.showInputBox({
+    title: `#${task.no} ${rel}:${from}${to !== from ? `-${to}` : ''}${side} — 질문하거나 고칠 내용`,
+    placeHolder: '예: 이 조건이 왜 필요해? / 여기 null 체크 추가하고 커밋해줘',
+    ignoreFocusOut: true,
+  });
+  if (!text || !text.trim()) return;
+  const hunks = ed.document.uri.scheme === 'file' ? await hunksAround(task.id, rel, from, to) : '';
+  const lang = ed.document.languageId || '';
+  const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}\n… (생략)` : s);
+  const prompt = [
+    `[리뷰 중 요청] 파일 \`${rel}\` ${from}${to !== from ? `-${to}` : ''}행${side} (worktree: ${path.join(task.workPath, ...rel.split('/'))})`,
+    '',
+    '선택한 코드:',
+    '\`\`\`' + lang,
+    clip(code, 6000),
+    '\`\`\`',
+    ...(hunks ? ['', '이 부분의 작업 변경 (SVN 기준 대비):', '\`\`\`diff', clip(hunks, 8000), '\`\`\`'] : []),
+    '',
+    `요청: ${text.trim()}`,
+    '(질문이면 코드를 고치지 말고 답만. 고치라는 요청이면 이 작업 worktree 에서 고치고 커밋)',
+  ].join('\n');
+  const target = vscode.workspace.getConfiguration('svnwt').get('reviewAskTarget') || 'chat';
+  if (target === 'background') {
+    await vscode.commands.executeCommand('svnwt.agent.instruct', task.id, prompt);
+    vscode.commands.executeCommand('svnwt.openReview', task.id);
+    return;
+  }
+  const query = target === 'copilot'
+    ? `SVN Worktree 작업 #${task.no} "${task.title}" (worktree: ${task.workPath}) 에 대한 요청입니다. svnwt 규칙대로 이 worktree 에서만 작업하세요.\n\n${prompt}`
+    : `@svnwt /continue ${task.no} ${prompt}`;
+  try {
+    await vscode.commands.executeCommand('workbench.action.chat.open', { query, isPartialQuery: false });
+  } catch (_) {
+    await vscode.env.clipboard.writeText(query);
+    vscode.window.showInformationMessage('채팅을 열 수 없어 요청을 클립보드에 복사했습니다. 채팅 입력란에 붙여 넣으세요.');
+  }
+}
+
+/** Context key for the editor menu: the active editor shows a task file (worktree, SVN-side of a task diff). */
+function updateInTaskContext() {
+  const ed = vscode.window.activeTextEditor;
+  let v = false;
+  try {
+    if (ed && ed.document.uri.scheme === SCHEME) v = true;
+    else if (ed && ed.document.uri.scheme === 'file') {
+      const m = service.mapPath(ed.document.uri.fsPath);
+      v = m.from === 'worktree' || (m.from === 'svn' && m.worktrees.some((w) => ['active', 'landed'].includes(w.status)));
+    }
+  } catch (_) { v = false; }
+  vscode.commands.executeCommand('setContext', 'svnwt.inTask', v);
+}
+
+async function openTaskFile(taskId, rel, line, opts = {}) {
   const { task } = service.resolveTask(taskId);
   const uri = vscode.Uri.file(path.join(task.workPath, ...String(rel).split('/')));
   const doc = await vscode.workspace.openTextDocument(uri);
   const pos = new vscode.Position(Math.max(0, (line || 1) - 1), 0);
-  await vscode.window.showTextDocument(doc, { selection: new vscode.Range(pos, pos), preview: true });
+  await vscode.window.showTextDocument(doc, { ...showOptions(opts.beside), selection: new vscode.Range(pos, pos) });
 }
 
 // ------------------------------------------------------------------ environment
@@ -318,7 +489,11 @@ function registerCommands(ctx) {
     if (pick.v === 'os') await vscode.commands.executeCommand('svnwt.revealWorktree', t.id);
   });
   reg('svnwt.openChanges', async (arg) => { const t = await pickTask(arg); await openChanges(t.id); });
-  reg('svnwt.openFileDiff', (taskId, f) => openFileDiff(taskId, f));
+  reg('svnwt.openFileDiff', (taskId, f, opts) => openFileDiff(taskId, f, opts));
+  reg('svnwt.openCommit', (taskId, sha) => openCommit(taskId, sha));
+  reg('svnwt.askAboutSelection', () => askAboutSelection());
+  ctx.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(() => updateInTaskContext()));
+  updateInTaskContext();
 
   reg('svnwt.askCopilotReview', async (arg) => {
     const t = await pickTask(arg);
@@ -437,13 +612,14 @@ function registerCommands(ctx) {
 
   reg('svnwt.commitSvn', async (arg) => prepareCommit(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
   reg('svnwt.commitSvnChoose', async (arg) => commitTaskToSvn(await pickTask(arg, (x) => x.status === 'landed'), 'ask'));
+  reg('svnwt.refreshPrepare', async (arg) => refreshPrepare(await pickTask(arg, (x) => service.pendingCommits().some((m) => m.task === x.id))));
   reg('svnwt.cancelCommit', async (arg) => {
     const pending = service.pendingCommits();
     if (!pending.length) { vscode.window.showInformationMessage('준비된 커밋이 없습니다.'); return; }
     const id = taskIdOf(arg) || pending[0].task;
     const t = service.resolveTask(id).task;
     if (watching && watching.task === t.id) stopWatching();
-    const res = await withProgress(`#${t.no} 커밋 준비를 되돌리는 중…`, () => service.endCommit(t.id));
+    const res = await withSteps(`#${t.no} 커밋 준비를 되돌리는 중…`, false, () => service.endCommit(t.id));
     await afterCommit(t, res, '');
   });
 
@@ -522,6 +698,35 @@ function registerCommands(ctx) {
     const r = await service.removeTask(t.id, { force });
     refreshAll();
     if (r.warnings.length) vscode.window.showWarningMessage(r.warnings.join('\n'));
+  });
+
+  reg('svnwt.addRule', async () => {
+    const text = await vscode.window.showInputBox({ title: '규칙 추가', prompt: '모든 작업에서 Copilot 이 지킬 규칙 (한 문장)', ignoreFocusOut: true });
+    if (!text || !text.trim()) return;
+    const r = service.addRule(text, { by: 'user' });
+    syncRules(ctx);
+    if (!r.added) vscode.window.showInformationMessage('같은 규칙이 이미 있습니다.');
+  });
+  reg('svnwt.editRule', async (el) => {
+    const r = el && el.rule;
+    if (!r) return;
+    const text = await vscode.window.showInputBox({ title: '규칙 수정', value: r.text, ignoreFocusOut: true });
+    if (!text || !text.trim() || text.trim() === r.text) return;
+    service.updateRule(r.id, text);
+    syncRules(ctx);
+  });
+  reg('svnwt.removeRule', async (el) => {
+    const r = el && el.rule;
+    if (!r) return;
+    const a = await vscode.window.showWarningMessage(`규칙을 삭제할까요?\n\n${r.text}`, { modal: true }, '삭제');
+    if (a !== '삭제') return;
+    service.removeRule(r.id);
+    syncRules(ctx);
+  });
+  reg('svnwt.openRulesFile', async () => {
+    const r = setup.installRules(ctx);
+    if (r.error) throw new Error(r.error);
+    await vscode.window.showTextDocument(vscode.Uri.file(r.file), { preview: true });
   });
 
   reg('svnwt.installInstructions', async () => {
@@ -646,6 +851,7 @@ async function commitTaskToSvn(t, mode) {
 let watching = null; // { task, timer, item }
 
 /** Poll until the prepared task shows up as committed (by a commit tool / TortoiseSVN), then restore everything. */
+let staleNotified = null;
 function watchExternalCommit(t) {
   stopWatching();
   const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -660,6 +866,16 @@ function watchExternalCommit(t) {
     busy = true;
     try {
       if (!service.pendingCommits().some((m) => m.task === t.id)) { stopWatching(); refreshAll(); return; }
+      if (await service.prepareIsStale(t.id)) {
+        const tip = service.resolveTask(t.id).task;
+        const k = `${t.id}:${tip.landed && tip.landed.commit}`;
+        if (staleNotified !== k) {
+          staleNotified = k;
+          refreshAll();
+          vscode.window.showWarningMessage(`#${t.no} 에 커밋 준비 후 새 git 커밋이 생겼습니다. working copy 에는 아직 이전 내용입니다.`, '커밋 준비 갱신')
+            .then((a) => { if (a) vscode.commands.executeCommand('svnwt.refreshPrepare', t.id); });
+        }
+      }
       if (await service.commitDone(t.id)) {
         stopWatching();
         const res = await service.endCommit(t.id);
@@ -694,14 +910,49 @@ async function offerUnblocked(t) {
  * 커밋 준비: set every local change of the SVN working copy aside, put only this task (from git) on the clean
  * SVN BASE, wait for the commit (TortoiseSVN), then put everything back (watchExternalCommit -> endCommit).
  */
+/** 커밋 준비 is on and the agent committed more: put the newest commits on the working copy. */
+async function refreshPrepare(t) {
+  if (!t) return undefined;
+  let r;
+  try {
+    r = await withCancel(`#${t.no} 커밋 준비 갱신 중…`, (token) => service.refreshStashCommit(t.id, { token })).finally(refreshAll);
+  } catch (e) {
+    if (e.cancelled) { vscode.window.showInformationMessage(e.message); return undefined; }
+    output.show(true);
+    throw e;
+  }
+  if (r.committed) { vscode.window.showInformationMessage(`#${t.no} 은 이미 SVN 에 커밋됐습니다. 정리를 기다립니다.`); return undefined; }
+  if (!r.ok) {
+    const a = await vscode.window.showWarningMessage(`#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다. 커밋 준비는 되돌렸습니다.`, { modal: true, detail: (r.blocked || []).map((b) => `✗ ${b.path}`).join('\n') }, 'rebase 후 커밋 준비');
+    if (a) return vscode.commands.executeCommand('svnwt.rebaseAndLand', t.id);
+    return undefined;
+  }
+  try { await vscode.env.clipboard.writeText(fs.readFileSync(r.messageFile, 'utf8').trim()); } catch (_) { /* no message file */ }
+  watchExternalCommit(t);
+  vscode.window.showInformationMessage(`#${t.no} 커밋 준비 갱신: 새 커밋까지 반영했습니다 (파일 ${r.files.length}개). TortoiseSVN 커밋 창이 열려 있으면 새로 고침(F5) 하세요.`);
+  return undefined;
+}
+
 async function prepareCommit(t) {
   if (!t) return undefined;
+  if (service.pendingCommits().some((m) => m.task === t.id && m.kind === 'stash' && m.phase === 'ready')) {
+    if (await service.prepareIsStale(t.id)) return refreshPrepare(t);
+    vscode.window.showInformationMessage(`#${t.no} 은 이미 커밋 준비됨 상태입니다. TortoiseSVN 으로 커밋하거나 커밋 취소하세요.`);
+    return undefined;
+  }
   const info = await service.taskInfo(t.id, { checkSvn: false });
   if (info.worktree && info.worktree.dirty.length) {
     const a = await vscode.window.showWarningMessage(`#${t.no}: worktree 에 git 커밋되지 않은 변경 ${info.worktree.dirty.length}개가 있습니다. 같이 올릴까요?`, { modal: true }, '같이 올리기');
     if (!a) return undefined;
   }
-  const r = await withProgress(`#${t.no} 커밋 준비 중…`, () => service.stashCommit(t.id)).finally(refreshAll);
+  let r;
+  try {
+    r = await withCancel(`#${t.no} 커밋 준비 중…`, (token) => service.stashCommit(t.id, { token })).finally(refreshAll);
+  } catch (e) {
+    if (e.cancelled) { vscode.window.showInformationMessage(e.message); return undefined; }
+    output.show(true);
+    throw e;
+  }
   if (!r.ok) {
     const a = await vscode.window.showWarningMessage(`#${t.no}: SVN 에 새로 커밋된 내용과 같은 줄을 고쳤습니다.`, {
       modal: true,
@@ -713,7 +964,7 @@ async function prepareCommit(t) {
   try { await vscode.env.clipboard.writeText(fs.readFileSync(r.messageFile, 'utf8').trim()); } catch (_) { /* no message file */ }
   watchExternalCommit(t);
   vscode.window.showInformationMessage(
-    `#${t.no} 커밋 준비 완료. TortoiseSVN 커밋 창에는 이 작업 파일 ${r.files.length}개만 있습니다. 커밋 메시지는 클립보드에 있습니다.` +
+    `#${t.no} 커밋 준비 완료. TortoiseSVN 커밋 창에는 이 작업 파일 ${r.files.length}개만 changelist "${t.changelist}" 로 묶여 있습니다. 커밋 메시지는 클립보드에 있습니다.` +
     (r.setAside ? ` 다른 로컬 변경 ${r.setAside}개는 커밋이 끝나면 돌아옵니다.` : ''),
     '커밋 취소').then((a) => { if (a) vscode.commands.executeCommand('svnwt.cancelCommit', t.id); });
   return undefined;
@@ -847,6 +1098,29 @@ function registerMcp(ctx) {
   }));
 }
 
+// ------------------------------------------------------------------ rules
+let knownRules = null;
+/** Rewrite the Copilot rules file and tell the user about rules an agent just added. */
+function syncRules(ctx) {
+  let list = [];
+  try { list = service.listRules(); } catch (e) { log(`rules: ${e.message}`); return; }
+  const r = setup.installRules(ctx);
+  if (r.changed) log(`규칙 지침 파일 갱신 (${list.length}개): ${r.file}`);
+  if (r.error) log(`규칙 지침 파일 쓰기 실패: ${r.error}`);
+  const ids = new Set(list.map((x) => x.id));
+  if (knownRules) {
+    const added = list.filter((x) => !knownRules.has(x.id) && x.by !== 'user');
+    for (const x of added) {
+      log(`새 규칙 (${x.by}${x.taskNo ? `, #${x.taskNo}` : ''}): ${x.text}`);
+      vscode.window.showInformationMessage(`새 규칙 저장됨${x.taskNo ? ` (#${x.taskNo})` : ''}: ${x.text}`, '규칙 보기').then((a) => {
+        if (a) vscode.commands.executeCommand('svnwt.tasks.focus');
+      });
+    }
+  }
+  knownRules = ids;
+  if (tree) tree.refresh();
+}
+
 // ------------------------------------------------------------------ activation
 function watchEvents(ctx) {
   let timer = null;
@@ -855,6 +1129,7 @@ function watchEvents(ctx) {
     clearTimeout(timer);
     timer = setTimeout(async () => {
       refreshAll();
+      syncRules(ctx);
       try { await autoAddWorktrees(ctx); } catch (e) { log(`autoAdd: ${e.message}`); }
     }, 250);
   };
@@ -920,8 +1195,21 @@ async function activate(ctx) {
   setup.applyToolEnv();
   migrateSettings().catch((e) => log(`migrate: ${e.message}`));
   service = new Service();
+  service.onLog = log;
+  proc.setLogger(log);
 
   tree = new TaskTree(service);
+  tree.instructionFiles = () => {
+    const roots = (vscode.workspace.workspaceFolders || []).filter((f) => !/^\[svnwt\]/.test(f.name)).map((f) => ({ path: f.uri.fsPath, label: `작업 영역 ${f.name}` }));
+    const worktrees = [];
+    for (const s of service.listScopes()) {
+      roots.push({ path: s.svnPath, label: `SVN ${s.id}` });
+      if (s.wcRoot && s.wcRoot !== s.svnPath) roots.push({ path: s.wcRoot, label: `SVN ${path.basename(s.wcRoot)}` });
+      for (const t of service.listTasks({ scope: s.id }).filter((x) => x.status === 'active')) worktrees.push({ path: t.workPath, svnPath: s.svnPath, label: `#${t.no}` });
+    }
+    return setup.instructionFiles(ctx, { roots, worktrees });
+  };
+  syncRules(ctx);
   ctx.subscriptions.push(vscode.window.createTreeView('svnwt.tasks', { treeDataProvider: tree, showCollapseAll: true }));
   ctx.subscriptions.push(vscode.workspace.registerFileSystemProvider(SCHEME, new GitFs(service), { isReadonly: true, isCaseSensitive: true }));
   registerCommands(ctx);

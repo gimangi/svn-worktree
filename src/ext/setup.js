@@ -80,6 +80,64 @@ function installInstructions(ctx, { force = false } = {}) {
   }
 }
 
+const RULES_FILE = 'svnwt-rules.instructions.md';
+
+/** The user's lasting rules as a user-level Copilot instructions file (rewritten when the rules change). */
+function installRules(ctx) {
+  const file = path.join(userPromptsDir(ctx), RULES_FILE);
+  const content = require('../core/rules').instructionsMarkdown();
+  try {
+    if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === content) return { file, changed: false };
+    store.ensureDir(path.dirname(file));
+    fs.writeFileSync(file, content, 'utf8');
+    return { file, changed: true };
+  } catch (e) {
+    return { file, changed: false, error: e.message };
+  }
+}
+
+/**
+ * Instruction files Copilot may read besides svnwt's own: user-level *.instructions.md, and in the workspace / SVN
+ * working copies / active task worktrees .github/copilot-instructions.md, .github/instructions/*.instructions.md,
+ * AGENTS.md. A worktree copy is listed only when it differs from the SVN one (an agent wrote it in the task).
+ */
+function instructionFiles(ctx, { roots = [], worktrees = [] } = {}) {
+  const out = [];
+  const seen = new Set();
+  const push = (file, where) => {
+    const k = path.resolve(file).toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    let st;
+    try { st = fs.statSync(file); } catch (_) { return; }
+    if (!st.isFile()) return;
+    out.push({ file, where, mtime: st.mtimeMs });
+  };
+  const own = new Set([INSTRUCTIONS_FILE, RULES_FILE, ...require('../agent/customAgents').files.map((f) => f.name)].map((n) => n.toLowerCase()));
+  const pd = userPromptsDir(ctx);
+  try {
+    for (const n of fs.readdirSync(pd)) if (/\.instructions\.md$/i.test(n) && !own.has(n.toLowerCase())) push(path.join(pd, n), '사용자 전체');
+  } catch (_) { /* no prompts folder */ }
+  const inRoot = (root) => {
+    const list = [path.join(root, '.github', 'copilot-instructions.md'), path.join(root, 'AGENTS.md')];
+    try {
+      const d = path.join(root, '.github', 'instructions');
+      for (const n of fs.readdirSync(d)) if (/\.md$/i.test(n)) list.push(path.join(d, n));
+    } catch (_) { /* none */ }
+    return list;
+  };
+  for (const r of roots) for (const f of inRoot(r.path)) push(f, r.label);
+  for (const w of worktrees) {
+    for (const f of inRoot(w.path)) {
+      const rel = path.relative(w.path, f);
+      let same = false;
+      try { same = fs.readFileSync(f).equals(fs.readFileSync(path.join(w.svnPath, rel))); } catch (_) { /* not in SVN */ }
+      if (!same) push(f, `${w.label} (worktree 에서 바뀜, SVN 에 같이 커밋됨)`);
+    }
+  }
+  return out;
+}
+
 /** Stage 1: custom agents (SVN Task / SVN Review) next to the instructions file. */
 function installAgents(ctx, { force = false } = {}) {
   const dir = userPromptsDir(ctx);
@@ -117,4 +175,4 @@ function exportVisualStudio(ctx) {
   return { file, serverDir: dest, instructions: path.join(dest, 'copilot-instructions.md') };
 }
 
-module.exports = { nodeRuntime, toolEnv, applyToolEnv, deployServer, installInstructions, installAgents, exportVisualStudio, userPromptsDir };
+module.exports = { nodeRuntime, toolEnv, applyToolEnv, deployServer, installInstructions, installRules, instructionFiles, installAgents, exportVisualStudio, userPromptsDir };

@@ -482,9 +482,96 @@ async function main() {
     assert.strictEqual(s.resolveTask(SC.id).task.status, 'active');
     ok('커밋 준비 stopped half way (VS Code restarted): task taken back out, everything set aside restored');
   }
+
+  { // cancel button: before anything is set aside, and after the task is on the working copy; log of every command
+    const proc = require('../src/core/proc');
+    const logs = [];
+    proc.setLogger((l) => logs.push(l));
+    await s.svn().then((x) => x.status(appDir));
+    assert(!logs.length, 'outside 커밋 준비 only slow commands are logged: ' + logs.join('\n'));
+    for (const at of ['빼 둘 변경', '이 작업 변경을 working copy 에 반영']) {
+      const token = { cancelled: false };
+      const steps = [];
+      s.onLog = (l) => { steps.push(l); if (l.includes(at)) token.cancelled = true; };
+      let err = null;
+      try { await s.stashCommit(SC.id, { token }); } catch (e) { err = e; }
+      assert(err && err.cancelled, err ? err.message : 'not cancelled');
+      assert.strictEqual(R(spPath), before);
+      assert.deepStrictEqual(stSet(), stSet(svnBefore));
+      assert.strictEqual(s.resolveTask(SC.id).task.status, 'active');
+      assert(!fs.existsSync(path.join(scope.home, 'commit-in-progress.json')), 'marker left');
+      assert(steps.some((l) => /\[커밋 준비 #\d+\] 시작/.test(l)), steps.join('\n'));
+    }
+    s.onLog = null;
+    assert(logs.some((l) => /^\$ svn .*status/.test(l)) && logs.some((l) => /^ {2}→ exit 0 \(\d+ms\)/.test(l)), logs.slice(0, 5).join('\n'));
+    proc.setLogger(null);
+    const sum = logs.filter((l) => /⏱ \[커밋 준비\] 총 [\d.]+s, 명령 실행 [\d.]+s — .*svn status ×\d+/.test(l));
+    assert(sum.length === 2, logs.filter((l) => /⏱/.test(l)).join('\n'));
+    console.log(sum.map((l) => '    ' + l.trim()).join('\n'));
+    ok(`커밋 준비 취소 (보관 전 / 작업 반영 후): working copy back exactly; ${logs.length} command log lines + time per command kind`);
+  }
+
+  { // lasting rules from feedback
+    const r1 = s.addRule('  주석은 한국어로  쓴다 ', { why: '리뷰에서 지적', task: String(SC.no), by: 'copilot' });
+    assert(r1.added && r1.rule.text === '주석은 한국어로 쓴다' && r1.rule.taskNo === SC.no, JSON.stringify(r1));
+    assert(!s.addRule('주석은 한국어로 쓴다').added, 'duplicate');
+    s.addRule('printf 디버그 코드는 남기지 않는다', { by: 'user' });
+    assert.strictEqual(s.listRules().length, 2);
+    s.updateRule(r1.rule.id, '주석은 한국어로, 짧게 쓴다');
+    const md = require('../src/core/rules').instructionsMarkdown();
+    assert(/applyTo: '\*\*'/.test(md) && md.includes('- 주석은 한국어로, 짧게 쓴다 (이유: 리뷰에서 지적)') && md.includes('- printf 디버그'), md);
+    s.removeRule(r1.rule.id);
+    assert.deepStrictEqual(s.listRules().map((r) => r.text), ['printf 디버그 코드는 남기지 않는다']);
+    ok('rules: add (normalized, task linked, no duplicates), edit, remove, Copilot instructions markdown');
+  }
+
+  { // per-commit changes (review panel / tree "커밋 N개")
+    edT(SC, 'sp.txt', 's4\r\n', 's4 SC2\r\n');
+    fs.writeFileSync(path.join(SC.workPath, 'sc-new.txt'), 'new\r\n');
+    await s.commitTask(SC.id, 'SC second');
+    const info = await s.taskInfo(SC.id, { checkSvn: false });
+    assert.strictEqual(info.commits.length, 2);
+    const second = await s.commitFiles(SC.id, info.commits[0].sha.slice(0, 10));
+    assert(second.subject === 'SC second' && second.files.map((f) => `${f.status} ${f.path}`).sort().join(',') === 'A sc-new.txt,M sp.txt', JSON.stringify(second));
+    assert(second.files.find((f) => f.path === 'sp.txt').add === 1, 'stats per commit');
+    const first = await s.commitFiles(SC.id, info.commits[1].sha);
+    assert(first.files.length === 1 && first.parent === info.base, JSON.stringify(first));
+    let threw = false;
+    try { await s.commitFiles(SC.id, info.base); } catch (_) { threw = true; }
+    assert(threw, 'a commit outside the task is refused');
+    ok('per-commit changes: files and +/- of each task commit against its parent');
+  }
+
+  { // 커밋 준비 is on, the agent commits more: 커밋 준비 갱신 puts the new tip on the working copy, nothing else moves
+    const p1 = await s.stashCommit(SC.id);
+    assert(p1.ok, JSON.stringify(p1));
+    assert(!(await s.prepareIsStale(SC.id)));
+    edT(SC, 'sp.txt', 's8\r\n', 's8 SC3\r\n');
+    await s.commitTask(SC.id, 'SC third (agent, while 커밋 준비)');
+    assert(await s.prepareIsStale(SC.id), 'new commit seen');
+    const rf = await s.refreshStashCommit(SC.id);
+    assert(rf.ok, JSON.stringify(rf));
+    assert.strictEqual(R(spPath), crlf('s1\ns2\ns3 SC\ns4 SC2\ns5\ns6\ns7\ns8 SC3\ns9\ns10\n'), 'newest task content, still only this task');
+    assert(fs.existsSync(path.join(appDir, 'sc-new.txt')));
+    const stq = svn('status', appDir);
+    assert([...stq.matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]).join() === s.resolveTask(SC.id).task.changelist, stq);
+    assert(!(await s.prepareIsStale(SC.id)));
+    const end = await s.endCommit(SC.id);
+    assert(!end.committed && !end.kept.length && !end.errors.length, JSON.stringify(end));
+    assert.strictEqual(R(spPath), before);
+    assert.deepStrictEqual(stSet(), stSet(svnBefore));
+    assert(!fs.existsSync(path.join(appDir, 'sc-new.txt')));
+    ok('커밋 준비 갱신: agent commit while prepared → newest tip on the working copy; cancel still restores everything');
+  }
   const pq = await s.stashCommit(Q1.id);
   assert(pq.ok, JSON.stringify(pq));
-  assert(!/--- Changelist/.test(svn('status', appDir)), 'no changelist while committing: TortoiseSVN checks every file');
+  {
+    // while committing: only the task's own changelist, holding every changed file (a group in TortoiseSVN, checked)
+    const stq = svn('status', appDir);
+    const groups = [...stq.matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]);
+    assert(groups.length === 1 && groups[0] === s.resolveTask(Q1.id).task.changelist, stq);
+    assert(!/^[MAD]/m.test(stq.split(/--- Changelist/)[0]), 'every task file is in the task changelist: ' + stq);
+  }
   assert.strictEqual(R(spPath), crlf('s1\ns2\ns3\ns4\ns5\ns6\ns7 Q1\ns8\ns9\ns10\n'));
   await s.endCommit(Q1.id);
   assert.strictEqual(s.resolveTask(Q1.id).task.status, 'landed');
@@ -495,6 +582,11 @@ async function main() {
   // commit: same file as another changelist and the user's edit, no conflict anywhere
   const pr = await s.stashCommit(SP.id);
   assert(pr.ok, JSON.stringify(pr));
+  { // sp.txt is also in Q1's (landed) changelist record: while committing it is still in SP's own changelist
+    const stp = svn('status', appDir);
+    assert([...stp.matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]).join() === s.resolveTask(SP.id).task.changelist, stp);
+    assert(!/^[MAD]/m.test(stp.split(/--- Changelist/)[0]), 'shared file in the task changelist: ' + stp);
+  }
   assert.strictEqual(R(spPath), crlf('s1\ns2 SP\ns3\ns4\ns5 SP\ns6\ns7\ns8\ns9\ns10\n'));
   const pending = svn('status', appDir).split(/\r?\n/).filter((l) => /^[MAD?]/.test(l));
   assert(pending.length === 2 && pending.every((l) => /sp\.txt|stray\.txt/.test(l)), pending.join(' | '));
@@ -570,6 +662,7 @@ async function main() {
   assert(res[2].result.tools.length >= 14);
   const status = JSON.parse(res[3].result.content[0].text);
   assert(status.ok && status.locations[0].scope === scope.id, res[3].result.content[0].text);
+  assert(status.rules.includes('printf 디버그 코드는 남기지 않는다') && res[2].result.tools.some((t) => t.name === 'svnwt_rule_add'), JSON.stringify(status.rules));
   const tinfo = JSON.parse(res[4].result.content[0].text);
   assert.strictEqual(tinfo.task.status, 'landed');
   assert(res[5].result.messages[0].content.text.includes('svnwt_task_review_get'));

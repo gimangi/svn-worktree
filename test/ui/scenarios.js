@@ -140,13 +140,14 @@ async function scenarios(d, ctx) {
   const S4 = '4. SVN 커밋 (사람, 커밋 준비 → TortoiseSVN)';
   const svnExe = (await require('../../src/core/env').detect()).svn.path;
   const svnSt = () => require('child_process').execFileSync(svnExe, ['status', ctx.wc], { encoding: 'utf8' });
-  await step({ scenario: S4, action: '"docs usage" 리뷰 화면 → "커밋 준비"', expect: '상태 표시줄 "커밋 준비됨", working copy 에는 이 작업 변경만 (다른 changelist 와 변경은 잠시 빼 둠), changelist 없음' }, async () => {
+  await step({ scenario: S4, action: '"docs usage" 리뷰 화면 → "커밋 준비"', expect: '상태 표시줄 "커밋 준비됨", working copy 에는 이 작업 변경만 (다른 changelist 와 변경은 잠시 빼 둠), changelist 는 이 작업 이름 하나' }, async () => {
     await d.click('.monaco-list-row', 'docs usage');
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="commitSvn"]').click(); return true; }`, 8000, P.docs);
     await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 15000, 'status bar');
     const st = svnSt();
     const changed = st.split(/\r?\n/).filter((l) => /^[MAD]/.test(l));
-    assert(!/--- Changelist/.test(st) && changed.length && changed.every((l) => /docs|README/.test(l)), st);
+    const groups = [...st.matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]);
+    assert(groups.length === 1 && /docs-usage/.test(groups[0]) && changed.length && changed.every((l) => /docs|README/.test(l)), st);
     let title = '';
     for (let i = 0; i < 30 && title !== '커밋 준비됨'; i++) {
       title = await d.webview(`(doc) => doc.querySelector('.next-title').textContent`, 8000, P.docs);
@@ -155,13 +156,17 @@ async function scenarios(d, ctx) {
     assert(title === '커밋 준비됨', title);
     return { note: `상태 상자: ${title} / 알림: ${(await d.notifications()).join(' | ').slice(0, 160)}` };
   });
-  await step({ scenario: S4, action: 'TortoiseSVN 커밋 창의 기본 선택 확인', expect: '체크되는 항목 = 이 작업의 파일과 새 폴더만', delay: 200 }, async () => {
+  await step({ scenario: S4, action: 'TortoiseSVN 커밋 창의 항목 확인', expect: '이 작업 파일은 모두 작업 이름 changelist 묶음 안 (기본 체크), 묶음 밖에는 새 폴더만', delay: 200 }, async () => {
     const st = svnSt();
     const lines = st.split(/\r?\n/);
     const idx = lines.findIndex((l) => /--- Changelist/.test(l));
-    const noCl = (idx < 0 ? lines : lines.slice(0, idx)).filter((l) => /^[MAD]/.test(l)).map((l) => l.replace(/^.\s+/, '').replace(ctx.wc + '\\', ''));
-    assert(noCl.length > 0 && noCl.every((p) => /docs|README/.test(p)), noCl.join(', '));
-    return { note: `changelist 밖(= TortoiseSVN 기본 체크): ${noCl.join(', ')}` };
+    assert(idx >= 0, st);
+    const rel = (l) => l.replace(/^.\s+/, '').replace(ctx.wc + '\\', '');
+    const inCl = lines.slice(idx + 1).filter((l) => /^[MAD]/.test(l)).map(rel);
+    const outside = lines.slice(0, idx).filter((l) => /^[MAD]/.test(l)).map(rel);
+    assert(inCl.length > 0 && inCl.every((p) => /docs|README/.test(p)), inCl.join(', '));
+    assert(outside.every((p) => { try { return require('fs').statSync(require('path').join(ctx.wc, p)).isDirectory(); } catch (_) { return false; } }), outside.join(', '));
+    return { note: `${lines[idx].trim()}: ${inCl.join(', ')}${outside.length ? ` / 묶음 밖(폴더): ${outside.join(', ')}` : ''}` };
   });
   await step({ scenario: S4, action: '"커밋 취소 (되돌리기)"', expect: 'changelist 원상복구, 상태 표시줄 사라짐' }, async () => {
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="cancelCommit"]').click(); return true; }`, 8000, P.docs);
@@ -232,7 +237,7 @@ async function scenarios(d, ctx) {
   // ---------------------------------------------------------------- 6
   const S6 = '6. 커밋 준비: 다른 변경은 잠시 빼 두고 이 작업만';
   let stBefore6 = '';
-  await step({ scenario: S6, action: '새 작업 리뷰 → "커밋 준비" (다른 작업 changelist 3개, 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '거부·확인 없이 바로 준비: working copy 에는 이 작업의 build.cmd 만, 상태 표시줄 "커밋 준비됨"' }, async () => {
+  await step({ scenario: S6, action: '새 작업 리뷰 → "커밋 준비" (다른 작업 changelist 3개, 같은 파일을 SVN 원본에서 직접 고쳐 둔 상태)', expect: '거부·확인 없이 바로 준비: working copy 에는 이 작업의 build.cmd 만 (작업 이름 changelist), 상태 표시줄 "커밋 준비됨"' }, async () => {
     stBefore6 = svnSt();
     assert((stBefore6.match(/--- Changelist/g) || []).length >= 3 && /build\.cmd/.test(stBefore6), stBefore6);
     await d.click('.activitybar .action-item .action-label', 'SVN Worktree');
@@ -242,7 +247,8 @@ async function scenarios(d, ctx) {
     await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar');
     const st = svnSt();
     const changed = st.split(/\r?\n/).filter((l) => /^[MAD?]/.test(l));
-    assert(!/--- Changelist/.test(st) && changed.length === 1 && /build\.cmd/.test(changed[0]), st);
+    const cls6 = [...st.matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]);
+    assert(cls6.length === 1 && cls6[0] === ctx.svc.resolveTask(agentTask.id).task.changelist && changed.length === 1 && /build\.cmd/.test(changed[0]), st);
     const build = require('fs').readFileSync(path.join(ctx.wc, 'trunk', 'tools', 'build.cmd'), 'utf8');
     assert(/echo clean/.test(build) && /echo done/.test(build), build);
     return { note: `svn status: ${changed.join(' ')} / 알림: ${(await d.notifications()).join(' | ').slice(0, 200)}` };
@@ -416,11 +422,12 @@ async function scenarios(d, ctx) {
     assert(r.title === '리뷰 대기' && r.buttons[0] === '커밋 준비', JSON.stringify(r));
     return { note: `${row.replace(/, has actions/, '')} / ${r.title} [${r.buttons.join(', ')}]` };
   });
-  await step({ scenario: S9, action: '"커밋 준비" 클릭', expect: 'working copy 에는 B 만 (A 의 changelist 는 잠시 빼 둠), changelist 없음' }, async () => {
+  await step({ scenario: S9, action: '"커밋 준비" 클릭', expect: 'working copy 에는 B 만 (A 의 changelist 는 잠시 빼 둠), changelist 는 B 이름 하나' }, async () => {
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="commitSvn"]').click(); return true; }`, 15000, String(OB.no) + '-');
     await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar');
     const readme = fsx.readFileSync(readmeWc, 'utf8');
-    assert(/\(B\)/.test(readme) && !/\(A\)/.test(readme) && !/--- Changelist/.test(svnSt()), readme + svnSt());
+    const cls = [...svnSt().matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]);
+    assert(/\(B\)/.test(readme) && !/\(A\)/.test(readme) && cls.length === 1 && cls[0] === ctx.svc.resolveTask(OB.id).task.changelist, readme + svnSt());
     return { note: svnSt().split(/\r?\n/).filter((l) => /^[MAD?]/.test(l)).join(' ') };
   });
   await step({ scenario: S9, action: 'TortoiseSVN 으로 커밋 (svn commit 대행) → 자동 감지', expect: '"SVN 커밋 완료" 알림, B 는 커밋 완료, 빼 두었던 A 의 changelist 와 변경이 새 기준 위에 돌아옴' }, async () => {
@@ -432,6 +439,43 @@ async function scenarios(d, ctx) {
     assert(new RegExp(ctx.svc.resolveTask(OA.id).task.changelist).test(st), st);
     assert(ctx.svc.resolveTask(OB.id).task.status === 'committed', ctx.svc.resolveTask(OB.id).task.status);
     return { note: `README: A 변경 복구 + B 커밋됨 / changelist: ${(st.match(/--- Changelist '[^']+'/g) || []).join(', ')}` };
+  });
+
+  // ---------------------------------------------------------------- 10. review → ask the agent about one spot
+  const S10 = '10. 변경 내용을 보다가 그 자리에서 질문/수정 지시';
+  await step({ scenario: S10, action: '에이전트 작업의 README 를 열고 첫 줄 선택 → "이 부분 질문/수정 지시…" → 질문 입력', expect: '작업 세션에 파일·줄 위치, 선택한 코드, 그 부분 diff 가 붙은 요청이 들어가고 에이전트가 답함' }, async () => {
+    const sf = path.join(path.dirname(ctx.demo), 'ud', 'User', 'settings.json');
+    let cfg = {};
+    try { cfg = JSON.parse(fsx.readFileSync(sf, 'utf8')); } catch (_) { /* none */ }
+    cfg['svnwt.reviewAskTarget'] = 'background';
+    fsx.mkdirSync(path.dirname(sf), { recursive: true });
+    fsx.writeFileSync(sf, JSON.stringify(cfg, null, 2));
+    await sleep(1000);
+    const info = ctx.svc.listTasks().find((t) => String(t.no) === agentTaskNo);
+    const file = path.join(info.workPath, 'app', 'README.md');
+    await d.key('P', { ctrl: true });
+    await sleep(500);
+    await d.type(file);
+    await sleep(800);
+    await d.key('Enter');
+    await sleep(1500);
+    await d.key('L', { ctrl: true }); // select the first line
+    await d.command('SVN Worktree: 이 부분 질문/수정 지시');
+    await d.waitFor(`!!document.querySelector('.quick-input-widget:not([style*="display: none"]) input')`, 5000, 'input box');
+    const title = await d.eval(`(document.querySelector('.quick-input-widget .quick-input-title') || {}).textContent || ''`);
+    assert(new RegExp(`#${agentTaskNo} app/README\\.md:1`).test(title), title);
+    await d.type('이 제목 줄은 왜 있어?');
+    await d.key('Enter');
+    const tr = await (async () => {
+      for (let i = 0; i < 60; i++) {
+        const t = await d.webview(`(doc) => { const t = doc.getElementById('transcript'); return t ? t.textContent.replace(/\\s+/g, ' ') : ''; }`, 15000, agentTaskNo + '-').catch(() => '');
+        if (/선택한 줄 확인/.test(t)) return t;
+        await sleep(500);
+      }
+      return '';
+    })();
+    assert(/\[리뷰 중 요청\] 파일 `?app\/README\.md`? 1행/.test(tr) && /요청: 이 제목 줄은 왜 있어\?/.test(tr) && /선택한 줄 확인/.test(tr), tr.slice(-1500));
+    return { note: `입력 창: ${title} / 세션: ${(tr.match(/\[리뷰 중 요청\][^|]{0,80}/) || [''])[0]} … 선택한 줄 확인` };
   });
 }
 
