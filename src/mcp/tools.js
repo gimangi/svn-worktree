@@ -207,6 +207,61 @@ const TOOLS = [
     handler: (svc, a) => svc.attachArtifacts(a.task, { paths: a.paths, dir: a.dir, title: a.title, status: a.status, summary: a.summary }),
   },
   {
+    name: 'svnwt_test_request',
+    description: 'Ask to test a task on the real local environment (the SVN working copy the local IIS site / app runs from, shared DB). Only one task can be there at a time, so requests wait in a queue and the user is asked before yours is applied. svnwt then puts ONLY this task (as of the given commit, default: the newest) on the working copy with every other local change set aside, and runs the scope\'s build command. Commit your work first (svnwt_task_commit). Then call svnwt_test_wait.',
+    inputSchema: {
+      type: 'object', required: ['task'], properties: {
+        task: TASK,
+        commit: str('Commit of the task to test (sha). Default: the task\'s newest commit. Uncommitted worktree edits are not included.'),
+        note: str('What you will test, shown to the user when asking (e.g. "로그인 화면, 주문 저장").'),
+        writes: bool('true if the test writes to the shared DB (creates/updates/deletes data). Use only test accounts / test data and clean up afterwards.'),
+      },
+    },
+    async handler(svc, a) {
+      const it = await svc.testRequest(a.task, { at: a.commit || null, note: a.note || '', writes: !!a.writes, by: 'agent' });
+      return Object.assign({}, it, { next: `Call svnwt_test_wait with id "${it.id}". The user may say no.` });
+    },
+  },
+  {
+    name: 'svnwt_test_wait',
+    description: 'Wait for a test request (from svnwt_test_request). status: queued/asking = still waiting (call again), building = applied and building, applied = the task is on the working copy and built (see build.ok / build.tail): test it now against the local site, then call svnwt_test_release. rejected / failed (reason) / cancelled / done = over. Never edit files in the SVN working copy (svnPath); fix things in the task worktree, commit, and request again.',
+    inputSchema: { type: 'object', required: ['id'], properties: { id: str('Request id.'), timeoutSec: { type: 'number', description: 'How long to wait (default 120, max 600).' } } },
+    async handler(svc, a) {
+      const r = await svc.testWait(a.id, { timeoutSec: a.timeoutSec || 120 });
+      const hint = {
+        queued: 'Still waiting for the working copy (another test or a commit holds it). Call svnwt_test_wait again.',
+        asking: 'The user is being asked. Call svnwt_test_wait again.',
+        building: 'Applied, build still running. Call svnwt_test_wait again.',
+        applied: r.build && !r.build.ok
+          ? 'Applied but the build failed (build.tail, build.logFile). Fix it in the worktree, commit, then svnwt_test_release this request and request again.'
+          : `Applied${r.build ? ' and built' : ''}. Test now against the local site (files are in ${r.svnPath}). Attach screenshots with svnwt_task_attach_screenshots, then call svnwt_test_release so the user gets their working copy back.`,
+        rejected: 'The user said no. Tell them what you wanted to test; do not ask again unless they want it.',
+        failed: 'Could not apply (reason). Usually: rebase the task (svnwt_task_sync) and request again.',
+      }[r.status];
+      return Object.assign({}, r, hint ? { next: hint } : {});
+    },
+  },
+  {
+    name: 'svnwt_test_release',
+    description: 'The test is over: svnwt takes the task back out of the working copy and puts the user\'s changes back. Always call it after testing (passed or failed), and also to cancel a request still waiting.',
+    inputSchema: {
+      type: 'object', required: ['id'], properties: {
+        id: str('Request id.'), result: { type: 'string', enum: ['passed', 'failed', 'cancelled'] },
+        summary: str('What was tested and the result (shown to the user).'),
+      },
+    },
+    handler: (svc, a) => svc.testRelease(a.id, { result: a.result || null, summary: a.summary || '', by: 'agent' }),
+  },
+  {
+    name: 'svnwt_test_queue',
+    description: 'Test requests of a scope (or all): what is on the working copy now, who waits, recent results.',
+    inputSchema: { type: 'object', properties: { scope: str('Optional scope id or path.') } },
+    handler: (svc, a) => {
+      const scopes = a.scope ? [svc.resolveScope(a.scope)] : svc.listScopes();
+      return { current: scopes.map((s) => svc.testState(s.id)).filter(Boolean), requests: svc.testQueue(a.scope) };
+    },
+  },
+  {
     name: 'svnwt_task_remove',
     description: 'Archive a task after its changelist was committed or when the user abandons it: deletes the worktree folder and the branch; the commits, reviews and agent session stay viewable under "보관된 작업" (svnwt_task_info / svnwt_task_diff still work on it).',
     inputSchema: { type: 'object', required: ['task'], properties: { task: TASK, force: bool('Remove even if the changelist is not committed yet.'), keepBranch: bool('Keep the git branch.'), keepHistory: { type: 'boolean', description: 'Keep the commits in the archive (default true).' } } },

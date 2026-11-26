@@ -191,6 +191,8 @@ function parseStatus(xml) {
       copied: a.copied === 'true',
       treeConflicted: a['tree-conflicted'] === 'true',
       changelist: cl ? cl.name : null,
+      movedFrom: a['moved-from'] ? path.resolve(xmlUnescape(a['moved-from'])) : null,
+      movedTo: a['moved-to'] ? path.resolve(xmlUnescape(a['moved-to'])) : null,
     });
   }
   return res;

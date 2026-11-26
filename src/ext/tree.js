@@ -146,6 +146,8 @@ class TaskTree {
           it.iconPath = new vscode.ThemeIcon('info');
           return [{ kind: 'hint', item: it }, ...tail];
         }
+        let local = null;
+        try { local = this.service.testState(el.scope.id); } catch (_) { /* none */ }
         return [...tasks.slice().reverse().map((t) => {
           const it = new vscode.TreeItem(`#${t.no} ${t.title}`, vscode.TreeItemCollapsibleState.Collapsed);
           const nFiles = t.landed && t.landed.files ? t.landed.files.length : null;
@@ -153,6 +155,11 @@ class TaskTree {
           it.iconPath = STATUS_ICON[t.status];
           it.contextValue = 'task.' + t.status;
           if (t.status === 'active' && t.readyAt) it.description = '리뷰 대기';
+          if (local && local.task === t.id) {
+            it.description = local.ready ? `로컬 반영됨 · ${String(local.sha || '').slice(0, 8)}${local.by === 'agent' ? ' · 에이전트 테스트' : ''}` : (local.building ? '빌드 중…' : '로컬에 반영하는 중…');
+            it.iconPath = local.ready ? new vscode.ThemeIcon('beaker', new vscode.ThemeColor('charts.orange')) : new vscode.ThemeIcon('loading~spin');
+            it.contextValue = 'task.local';
+          }
           if (t.status === 'active' && t.waitFor && t.waitFor.tasks.length) {
             const pending = t.waitFor.tasks.filter((w) => { const o = tasks.find((x) => x.id === w.id); return o && o.status === 'landed'; });
             it.description += pending.length ? ` · #${pending.map((w) => w.no).join(', #')} 커밋 후` : ' · rebase 후 반영';

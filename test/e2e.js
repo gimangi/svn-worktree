@@ -512,6 +512,98 @@ async function main() {
     ok(`커밋 준비 취소 (보관 전 / 작업 반영 후): working copy back exactly; ${logs.length} command log lines + time per command kind`);
   }
 
+  { // test on the working copy (local IIS site): one at a time, pinned to a commit, everything put back
+    const ST = await s.createTask(scope.id, { title: 'test on wc' });
+    edT(ST, 'sp.txt', 's3\r\n', 's3 ST\r\n'); await s.commitTask(ST.id, 'ST1');
+    const sha1 = (await s.taskInfo(ST.id, { checkSvn: false })).tip;
+    edT(ST, 'sp.txt', 's4\r\n', 's4 ST2\r\n'); await s.commitTask(ST.id, 'ST2');
+    const q1 = await s.testRequest(ST.id, { at: sha1.slice(0, 10), note: '로그인 화면' });
+    assert(q1.status === 'queued' && q1.position === 1 && q1.sha === sha1, JSON.stringify(q1));
+    const q2 = await s.testRequest(ST.id, { at: sha1, writes: true });
+    assert(q2.id === q1.id && q2.writes, 'a request of the same task still waiting is replaced, not added');
+    await assert.rejects(s.testRequest(ST.id, { at: (await s.taskInfo(SC.id, { checkSvn: false })).tip }), /작업의 커밋이 아닙니다/);
+    const claimed = await s.testClaimNext(scope.id);
+    assert(claimed && claimed.id === q1.id && claimed.status === 'asking', JSON.stringify(claimed));
+    assert.strictEqual(await s.testClaimNext(scope.id), null, 'one request asked at a time');
+    const ap = await s.testApplyItem(q1.id);
+    assert(ap.ok && ap.sha === sha1, JSON.stringify(ap));
+    assert.strictEqual(R(spPath), crlf('s1\ns2\ns3 ST\ns4\ns5\ns6\ns7\ns8\ns9\ns10\n'), 'only this task, as of the requested commit');
+    const ts = s.testState(scope.id);
+    assert(ts && ts.task === ST.id && ts.item === q1.id && ts.sha === sha1, JSON.stringify(ts));
+    assert.strictEqual((await s.taskInfo(ST.id, { checkSvn: false })).testInProgress.mine, true);
+    await assert.rejects(s.stashCommit(Q1.id), /로컬\(SVN working copy\)에 반영돼/, 'no 커밋 준비 of another task while one is applied');
+    await s.testRequest(SC.id);
+    assert.strictEqual(await s.testClaimNext(scope.id), null, 'the next request waits for the test');
+    // the user edits the tested file in the working copy during the test
+    fs.writeFileSync(spPath, R(spPath).replace('s6\r\n', 's6 DURING TEST\r\n'));
+    const rel = await s.testRelease(q1.id, { result: 'passed', summary: 'ok' });
+    assert(rel.status === 'done' && rel.result === 'passed', JSON.stringify(rel));
+    assert.strictEqual(R(spPath), before, 'working copy back as before the test (user edit, other task)');
+    assert.deepStrictEqual(stSet(), stSet(svnBefore));
+    assert.strictEqual(s.resolveTask(ST.id).task.status, 'active');
+    assert.deepStrictEqual(rel.restore.edited.map((e) => e.path), ['sp.txt']);
+    assert(/s6 DURING TEST/.test(R(rel.restore.edited[0].copy)), 'what was edited during the test is kept in the stash');
+    assert(!s.testState(scope.id));
+    ok('test on the working copy: queue (one per task), pinned commit applied alone, 커밋 준비 blocked, restored exactly; edit during the test kept');
+
+    // the next request; VS Code restarted during the test: endCommit (start-up recovery) restores and closes it
+    const next = await s.testClaimNext(scope.id);
+    assert(next && next.task === SC.id, JSON.stringify(next));
+    await s.testResetAsking();
+    assert.strictEqual(s.testItem(next.id).item.status, 'queued', 'asking left by a restart goes back to the queue');
+    assert.strictEqual((await s.testReject(next.id)).status, 'rejected');
+    assert.strictEqual((await s.testWait(next.id, { timeoutSec: 1 })).status, 'rejected');
+    const mine = await s.testRequest(ST.id, { by: 'user' });
+    assert.strictEqual(await s.testClaimNext(scope.id), null, 'the user\'s own request is not asked');
+    const ap2 = await s.testApplyItem(mine.id);
+    assert(ap2.ok && /s4 ST2/.test(R(spPath)), 'default: newest commit');
+    const rec = await s.endCommit(ST.id);
+    assert(rec.test && !rec.errors.length && !rec.kept.length, JSON.stringify(rec));
+    assert.strictEqual(R(spPath), before);
+    assert.deepStrictEqual(stSet(), stSet(svnBefore));
+    assert.strictEqual(s.testItem(mine.id).item.status, 'done');
+    // the extension polls the queue every few seconds: with nothing waiting it must not write or fire events
+    // (0.5.1 dev: every poll touched events.json -> refresh -> poll ... and the review panel never rendered)
+    const evFile = path.join(process.env.SVNWT_HOME, 'events.json');
+    const qFile = path.join(scope.home, 'test-queue.json');
+    const ev0 = fs.statSync(evFile).mtimeMs;
+    const q0 = fs.statSync(qFile).mtimeMs;
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(await s.testClaimNext(scope.id), null);
+    await s.testResetAsking();
+    await s._testQueueEdit(scope, () => null);
+    assert(fs.statSync(evFile).mtimeMs === ev0 && fs.statSync(qFile).mtimeMs === q0, 'idle queue poll must not write');
+    ok('test: rejected request, user\'s own test (newest commit), restored by start-up recovery; idle poll writes nothing');
+
+    // 로컬 반영 (+ build) → 커밋 준비: only the changelist is added; cancel restores everything
+    s.setLocalBuild(scope.id, 'echo building %CD% && echo 한글 출력');
+    const outLines = [];
+    const la = await s.localApply(ST.id, { onOutput: (l) => outLines.push(l) });
+    assert(la.ok && la.build && la.build.ok && la.build.code === 0, JSON.stringify(la.build));
+    assert(outLines.some((l) => /building .*app/i.test(l)) && outLines.some((l) => l.includes('한글 출력')), outLines.join('|'));
+    assert(fs.existsSync(la.build.logFile));
+    assert(!/Changelist/.test(svn('status', appDir)), '로컬 반영: no changelist yet');
+    const pf = await s.prepareFromLocal(ST.id);
+    assert(pf.ok && pf.files.includes('sp.txt'), JSON.stringify(pf));
+    const stp = svn('status', appDir);
+    assert([...stp.matchAll(/--- Changelist '([^']+)'/g)].map((m) => m[1]).join() === s.resolveTask(ST.id).task.changelist, stp);
+    assert(!s.testState(scope.id) && s.pendingCommits().some((m) => m.task === ST.id && m.kind === 'stash' && m.phase === 'ready'));
+    const pfEnd = await s.endCommit(ST.id);
+    assert(!pfEnd.committed && !pfEnd.kept.length && !pfEnd.errors.length, JSON.stringify(pfEnd));
+    assert.strictEqual(R(spPath), before);
+    assert.deepStrictEqual(stSet(), stSet(svnBefore));
+    s.setLocalBuild(scope.id, 'exit /b 3');
+    const lb = await s.localApply(ST.id);
+    assert(lb.ok && lb.build && !lb.build.ok && lb.build.code === 3, JSON.stringify(lb.build));
+    assert(s.testState(scope.id), 'a failed build leaves the task applied');
+    await s.endTest(ST.id);
+    s.setLocalBuild(scope.id, '');
+    assert.strictEqual(R(spPath), before);
+    assert.deepStrictEqual(stSet(), stSet(svnBefore));
+    await s.removeTask(ST.id, { force: true });
+    ok('로컬 반영 + build (output lines, log, exit code) → 커밋 준비 adds only the changelist; cancel restores');
+  }
+
   { // lasting rules from feedback
     const r1 = s.addRule('  주석은 한국어로  쓴다 ', { why: '리뷰에서 지적', task: String(SC.no), by: 'copilot' });
     assert(r1.added && r1.rule.text === '주석은 한국어로 쓴다' && r1.rule.taskNo === SC.no, JSON.stringify(r1));
@@ -817,6 +909,38 @@ async function main() {
     assert((await s.syncTask(C.id, { cont: true })).ok, 'cont after the fix');
     assert(!(await s.tasksBehind(scope.id)).some((x) => x.id === C.id));
     ok('rebase: detached HEAD refused, non-conflict failure (index.lock) undone with its reason, conflict -> fix -> cont');
+  }
+
+  { // 로컬 반영, then committed straight from TortoiseSVN (no 커밋 준비): detected, set-aside changes come back
+    const D = await s.createTask(scope.id, { title: 'direct commit' });
+    fs.writeFileSync(path.join(D.workPath, 'direct.txt'), 'direct\r\n');
+    await s.commitTask(D.id, 'direct');
+    fs.writeFileSync(path.join(appDir, 'user-local.txt'), 'mine\r\n');
+    const st0 = stSet();
+    const la = await s.localApply(D.id);
+    assert(la.ok, JSON.stringify(la));
+    assert(!(await s.commitDone(D.id)), 'not committed yet');
+    svn('commit', '-m', 'direct commit of the applied task', path.join(appDir, 'direct.txt'));
+    assert(await s.commitDone(D.id), 'commit detected while applied');
+    const end = await s.endCommit(D.id);
+    assert(end.committed && !end.errors.length, JSON.stringify(end));
+    assert.strictEqual(s.resolveTask(D.id).task.status, 'committed');
+    assert.deepStrictEqual(stSet(), st0, 'everything set aside is back');
+    fs.rmSync(path.join(appDir, 'user-local.txt'));
+    ok('로컬 반영 → direct svn commit (no 커밋 준비): commit detected, task committed, set-aside changes restored');
+
+    // 커밋 완료 취소: back to 진행 중 by hand; 로컬 반영 works again
+    const ro = await s.reopenTask(D.id);
+    const dt = s.resolveTask(D.id).task;
+    assert(ro.status === 'active' && dt.status === 'active' && dt.landed === null && !dt.committedAt && !dt.leftovers && dt.reopenedAt, JSON.stringify(dt));
+    await assert.rejects(s.reopenTask(D.id), /커밋 완료 상태인 작업만/);
+    assert(!(await s.taskInfo(D.id)).task.committedAt, 'not marked committed again by taskInfo');
+    const st1 = stSet();
+    const la2 = await s.localApply(D.id);
+    assert(la2.ok, JSON.stringify(la2));
+    await s.endTest(D.id);
+    assert.deepStrictEqual(stSet(), st1);
+    ok('커밋 완료 취소: task back to 진행 중 (git untouched), not re-marked, 로컬 반영 again');
   }
 
   console.log(`\n# all ${step} checks passed`);

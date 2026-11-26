@@ -13,9 +13,11 @@ const { ReviewPanel } = require('./review');
 const setup = require('./setup');
 const { setupAgent } = require('./agentUi');
 const { createSvnWatch } = require('./svnWatch');
+const { createLocalApply } = require('./localApply');
 
 let service;
 let svnWatch = null;
+let localApply = null; // 로컬 반영 (src/ext/localApply.js)
 let taskView = null;
 let treeTaskId = null; // last task selected in the tree (the tree's own selection is lost when it refreshes)
 let tree;
@@ -814,6 +816,24 @@ function registerCommands(ctx) {
     vscode.window.showInformationMessage(`되돌림 완료${c.length ? ` (수동 확인 필요: ${c.map((x) => x.path).join(', ')})` : ''}`);
   });
 
+  reg('svnwt.reopenTask', async (arg) => {
+    const t = await pickTask(arg, (x) => x.status === 'committed');
+    if (!t) return;
+    const a = await vscode.window.showWarningMessage(`#${t.no} "${t.title}" 의 커밋 완료 표시를 취소하고 진행 중으로 되돌릴까요?`, {
+      modal: true,
+      detail: 'SVN 에 실제로 커밋되지 않았는데 커밋 완료로 표시된 경우에 씁니다. git 커밋과 worktree 는 그대로이고 SVN 은 바꾸지 않습니다. 되돌린 뒤 로컬에 반영하거나 커밋 준비할 수 있습니다.',
+    }, '진행 중으로 되돌리기');
+    if (!a) return;
+    const r = await service.reopenTask(t.id);
+    refreshAll();
+    vscode.window.showInformationMessage(`#${t.no} 을(를) 진행 중으로 되돌렸습니다.${r.changelistInWc.length ? ` working copy 에 이 작업 changelist 파일 ${r.changelistInWc.length}개가 남아 있습니다 (커밋 준비 때 잠시 빼 두었다가 되돌림).` : ''}`, '리뷰 열기')
+      .then((x) => { if (x) vscode.commands.executeCommand('svnwt.openReview', t.id); });
+  });
+  reg('svnwt.applyLocal', async (arg) => localApply.applyLocal(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
+  reg('svnwt.endLocal', async (arg) => localApply.endLocal(arg ? await pickTask(arg) : null));
+  reg('svnwt.rebuildLocal', async (arg) => localApply.rebuild(arg ? await pickTask(arg) : null));
+  reg('svnwt.setLocalBuild', async (arg) => localApply.setBuild(arg && arg.scope ? arg.scope.id : (arg && arg.kind === 'scope' ? arg.scope.id : undefined)));
+  reg('svnwt.localApplyMenu', async () => localApply.menu());
   reg('svnwt.commitSvn', async (arg) => prepareCommit(await pickTask(arg, (x) => x.status === 'active' || x.status === 'landed')));
   reg('svnwt.commitSvnChoose', async (arg) => commitTaskToSvn(await pickTask(arg, (x) => x.status === 'landed'), 'ask'));
   reg('svnwt.refreshPrepare', async (arg) => refreshPrepare(await pickTask(arg, (x) => service.pendingCommits().some((m) => m.task === x.id))));
@@ -1260,6 +1280,21 @@ async function resolveRebaseWithAgent(t, conflicts) {
 
 async function prepareCommit(t, opts = {}) {
   if (!t) return undefined;
+  const local = localApply && localApply.stateOf(t);
+  if (local && local.task === t.id && !local.ready) { vscode.window.showInformationMessage(`#${t.no} ${local.building ? '빌드 중' : '로컬에 반영하는 중'}입니다. 끝난 뒤 커밋 준비하세요.`); return undefined; }
+  if (local && local.task === t.id) {
+    const tip = (await service.taskInfo(t.id, { checkSvn: false })).tip;
+    if (tip !== local.sha) {
+      const a = await vscode.window.showWarningMessage(`#${t.no}: 로컬에 반영한 뒤 새 git 커밋이 생겼습니다 (반영된 것은 ${local.sha.slice(0, 8)}).`, { modal: true }, '새 커밋으로 다시 반영', '반영된 상태로 커밋 준비');
+      if (!a) return undefined;
+      if (a === '새 커밋으로 다시 반영') return localApply.applyLocal(t);
+    }
+    return localApply.prepare(t);
+  }
+  if (local) {
+    const a = await vscode.window.showWarningMessage(`#${local.no} "${local.title}" 이(가) 로컬에 반영돼 있습니다. 되돌리고 #${t.no} 을(를) 커밋 준비할까요?`, { modal: true }, `#${local.no} 되돌리고 커밋 준비`);
+    if (!a || !(await localApply.endLocal(service.resolveTask(local.task).task, { quiet: true }))) return undefined;
+  }
   if (service.pendingCommits().some((m) => m.task === t.id && m.kind === 'stash' && m.phase === 'ready')) {
     if (await service.prepareIsStale(t.id)) return refreshPrepare(t);
     vscode.window.showInformationMessage(`#${t.no} 은 이미 커밋 준비됨 상태입니다. TortoiseSVN 으로 커밋하거나 커밋 취소하세요.`);
@@ -1453,6 +1488,7 @@ function watchEvents(ctx) {
     timer = setTimeout(async () => {
       refreshAll();
       syncRules(ctx);
+      if (localApply) localApply.tick();
       try { await autoAddWorktrees(ctx); } catch (e) { log(`autoAdd: ${e.message}`); }
     }, 250);
   };
@@ -1543,6 +1579,8 @@ async function activate(ctx) {
   watchEvents(ctx);
   svnWatch = createSvnWatch({ vscode, service, refreshAll, log });
   if (!process.env.SVNWT_NO_SVN_WATCH) svnWatch.start(ctx);
+  localApply = createLocalApply({ vscode, service, refreshAll, log, output, withCancel, withSteps, afterCommit, startCommitWatch: watchExternalCommit, explainBlocked });
+  localApply.start(ctx);
   statusBar(ctx);
 
   checkEnvironment(false).then(async () => {
@@ -1552,6 +1590,13 @@ async function activate(ctx) {
       for (const m of service.pendingCommits().filter((x) => x.external)) {
         try {
           const t = service.resolveTask(m.task).task;
+          if (m.kind === 'test') {
+            if (m.phase !== 'ready') {
+              const r = await service.endCommit(t.id);
+              vscode.window.showInformationMessage(`SVN Worktree: 중간에 멈춘 #${t.no} 로컬 반영을 되돌렸습니다 (빼 두었던 변경 ${r.restored}개 복구).${r.kept && r.kept.length ? ` 되돌리지 못한 파일은 보관본에 있습니다: ${r.stash}` : ''}`);
+            }
+            continue;
+          }
           if (m.kind === 'stash' && m.phase !== 'ready') {
             // VS Code stopped in the middle of "커밋 준비": put everything back
             const r = await service.endCommit(t.id);

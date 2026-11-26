@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -357,6 +357,40 @@
         "command": "svnwt.showShortcuts",
         "title": "단축키 보기·바꾸기",
         "icon": "$(keyboard)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.applyLocal",
+        "title": "로컬에 반영 (빌드까지)",
+        "icon": "$(beaker)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.endLocal",
+        "title": "로컬 반영 되돌리기",
+        "icon": "$(discard)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.rebuildLocal",
+        "title": "로컬 반영 다시 빌드",
+        "icon": "$(tools)"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.setLocalBuild",
+        "title": "로컬 반영 빌드 명령 설정…"
+      },
+      {
+        "category": "SVN Worktree",
+        "command": "svnwt.localApplyMenu",
+        "title": "로컬 반영 메뉴"
+      },
+      {
+        "command": "svnwt.reopenTask",
+        "title": "커밋 완료 취소 (진행 중으로 되돌리기)",
+        "category": "SVN Worktree",
+        "icon": "$(debug-step-back)"
       }
     ],
     "menus": {
@@ -572,6 +606,51 @@
           "command": "svnwt.purgeTask",
           "when": "view == svnwt.tasks && viewItem == task.archived",
           "group": "9@1"
+        },
+        {
+          "command": "svnwt.applyLocal",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.active/",
+          "group": "inline@0"
+        },
+        {
+          "command": "svnwt.applyLocal",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.(active|landed)/",
+          "group": "2@0"
+        },
+        {
+          "command": "svnwt.commitSvn",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.local/",
+          "group": "inline@1"
+        },
+        {
+          "command": "svnwt.endLocal",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.local/",
+          "group": "inline@2"
+        },
+        {
+          "command": "svnwt.commitSvn",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.local/",
+          "group": "2@1"
+        },
+        {
+          "command": "svnwt.rebuildLocal",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.local/",
+          "group": "2@2"
+        },
+        {
+          "command": "svnwt.endLocal",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.local/",
+          "group": "2@3"
+        },
+        {
+          "command": "svnwt.setLocalBuild",
+          "when": "view == svnwt.tasks && viewItem == scope",
+          "group": "5@9"
+        },
+        {
+          "command": "svnwt.reopenTask",
+          "when": "view == svnwt.tasks && viewItem =~ /^task.committed/",
+          "group": "8@2"
         }
       ],
       "explorer/context": [
@@ -653,6 +732,10 @@
         {
           "command": "svnwt.prevChange",
           "when": "svnwt.diffNav"
+        },
+        {
+          "command": "svnwt.localApplyMenu",
+          "when": "false"
         }
       ],
       "editor/context": [
@@ -832,6 +915,21 @@
           ],
           "default": "review",
           "description": "변경 파일을 눌렀을 때 diff 를 여는 위치. diff 제목줄의 \"새 창으로 분리\" / \"리뷰 화면 탭으로\" 버튼을 누르면 그 방식이 여기에 저장되어 다음에도 같은 방식으로 열립니다."
+        },
+        "svnwt.localApply.agentRequests": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "always",
+            "never"
+          ],
+          "default": "ask",
+          "enumDescriptions": [
+            "에이전트가 로컬 반영(테스트)을 요청하면 반영할지 묻습니다 (예 / 아니요 / 항상)",
+            "묻지 않고 반영합니다",
+            "반영하지 않고 거절합니다"
+          ],
+          "description": "에이전트(svnwt_test_request)가 작업을 SVN working copy 에 반영해 테스트하려고 할 때. 반영하는 동안 다른 로컬 변경은 빼 두었다가 테스트가 끝나면 되돌립니다."
         }
       }
     },

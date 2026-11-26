@@ -97,6 +97,10 @@ class ReviewPanel {
         case 'land': return vscode.commands.executeCommand('svnwt.land', this.taskId);
         case 'unland': return vscode.commands.executeCommand('svnwt.unland', this.taskId);
         case 'commitSvn': return vscode.commands.executeCommand('svnwt.commitSvn', this.taskId);
+        case 'reopen': return vscode.commands.executeCommand('svnwt.reopenTask', this.taskId);
+        case 'applyLocal': return vscode.commands.executeCommand('svnwt.applyLocal', this.taskId);
+        case 'endLocal': return vscode.commands.executeCommand('svnwt.endLocal', this.taskId);
+        case 'rebuildLocal': return vscode.commands.executeCommand('svnwt.rebuildLocal', this.taskId);
         case 'copyCmd': return vscode.commands.executeCommand('svnwt.copyCommitCommand', this.taskId);
         case 'sync': return vscode.commands.executeCommand('svnwt.syncTask', this.taskId);
         case 'worktree': return vscode.commands.executeCommand('svnwt.openWorktree', this.taskId);
@@ -190,14 +194,28 @@ class ReviewPanel {
     let title = '';
     let text = '';
     let buttons = [];
-    if (t.status === 'active') {
+    const local = info.testInProgress;
+    if (local && !local.mine && ['active', 'landed'].includes(t.status)) notes.push(['warn', `다른 작업(${local.task})이 로컬에 반영돼 있습니다. 이 작업을 반영하거나 커밋 준비하면 그 작업은 먼저 되돌립니다.`]);
+    if (local && local.mine && !local.ready) {
+      title = local.building ? '로컬에 반영됨 · 빌드 중' : '로컬에 반영하는 중';
+      text = local.building ? '빌드 출력은 출력 패널(SVN Worktree)에 나옵니다. 끝나면 커밋 준비 / 되돌리기를 할 수 있습니다.' : '다른 로컬 변경을 빼 두고 이 작업을 올리는 중입니다.';
+      buttons = [['openChanges', '모든 변경 사항 보기']];
+    } else if (local && local.mine) {
+      title = '로컬에 반영됨';
+      text = 'SVN working copy 에 이 작업만 올라가 있습니다. 로컬 사이트에서 확인한 뒤 커밋 준비를 누르면 changelist 를 만듭니다. TortoiseSVN 으로 바로 커밋해도 알아서 정리합니다. 되돌리면 빼 둔 다른 변경이 돌아옵니다.';
+      buttons = [['commitSvn', '커밋 준비', 'primary'], ['rebuildLocal', '다시 빌드'], ['endLocal', '되돌리기'], ['openChanges', '모든 변경 사항 보기']];
+      if (local.sha && info.tip !== local.sha) {
+        notes.push(['warn', `반영한 뒤 새 git 커밋이 생겼습니다. working copy 에는 ${local.sha.slice(0, 8)} 까지만 있습니다.`]);
+        buttons.splice(1, 0, ['applyLocal', '새 커밋으로 다시 반영']);
+      }
+    } else if (t.status === 'active') {
       if (!files.length) {
         title = '작업 중';
         text = '아직 커밋된 변경이 없습니다. Copilot 이 worktree 에서 작업하고 커밋하면 여기에 표시됩니다.';
       } else {
-        title = t.readyAt ? '리뷰 대기' : '리뷰 후 커밋 준비';
-        text = '커밋 준비를 누르면 SVN working copy 에 이 작업만 올립니다. 다른 로컬 변경은 커밋이 끝날 때까지 잠시 빼 두었다가 되돌립니다.';
-        buttons = [['commitSvn', '커밋 준비', 'primary'], ['openChanges', '모든 변경 사항 보기'], ['askCopilot', 'Copilot 리뷰 요청']];
+        title = t.readyAt ? '리뷰 대기' : '로컬에서 확인 후 커밋 준비';
+        text = '로컬에 반영하면 SVN working copy 에 이 작업만 올리고 빌드까지 합니다. 확인한 뒤 커밋 준비로 changelist 를 만듭니다. 다른 로컬 변경은 잠시 빼 두었다가 되돌립니다.';
+        buttons = [['applyLocal', '로컬에 반영', 'primary'], ['commitSvn', '커밋 준비'], ['openChanges', '모든 변경 사항 보기'], ['askCopilot', 'Copilot 리뷰 요청']];
       }
       const waitFor = info.waitFor || [];
       if (files.length && waitFor.length && !info.waitReady) {
@@ -246,10 +264,11 @@ class ReviewPanel {
         notes.push(['warn', `커밋에서 빠진 파일 ${left.length}개가 남아 있습니다: ${left.join(', ')}`]);
         buttons = [['discardLeftovers', '남은 변경 버리기', 'primary'], ['remove', '보관 (worktree 정리)'], ['discardScope', 'SVN 남은 변경 정리…'], ['openChanges', '변경 사항 보기']];
       }
+      buttons.push(['reopen', '커밋 완료 취소 (진행 중으로)']);
     }
     if (['landed', 'committed'].includes(t.status) && !(info.commitInProgress && info.commitInProgress.mine)) buttons.push(['checkSvn', 'SVN 상태 확인']);
     if (info.worktree && (info.worktree.rebasing || info.worktree.merging)) buttons = [['agentRebase', '에이전트에게 맡기기', 'primary'], ...buttons.map(([c, l]) => [c, l])];
-    const cmd = t.status === 'landed' && info.commit && !(info.commitInProgress && info.commitInProgress.mine)
+    const cmd = t.status === 'landed' && info.commit && !(info.commitInProgress && info.commitInProgress.mine) && !(local && local.mine)
       ? `<div class="sub"><a href="#" data-cmd="commitChoose">다른 방법으로 커밋…</a></div>` : '';
     return `<div class="next next-${esc(t.status)}"><div class="next-title">${esc(title)}</div><div class="next-text">${esc(text)}</div>
       ${notes.map(([k, n]) => `<div class="note note-${k}">${esc(n)}</div>`).join('')}

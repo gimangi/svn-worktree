@@ -595,7 +595,7 @@ async function scenarios(d, ctx) {
   const rqB = await ctx.svc.requestChangelist(OB.id);
   assert(rqB.ready, JSON.stringify(rqB));
   const readmeWc = path.join(ctx.wc, 'trunk', 'app', 'README.md');
-  await step({ scenario: S9, action: '에이전트가 끝낸 작업 (B) 리뷰 화면', expect: '트리와 상태 상자에 "리뷰 대기", 주 버튼 "커밋 준비"' }, async () => {
+  await step({ scenario: S9, action: '에이전트가 끝낸 작업 (B) 리뷰 화면', expect: '트리와 상태 상자에 "리뷰 대기", 주 버튼 "로컬에 반영", 다음 "커밋 준비"' }, async () => {
     let row = '';
     for (let i = 0; i < 70 && !/리뷰 대기/.test(row); i++) { await sleep(300); row = (await treeRows()).find((r) => r.includes('readme title B')) || ''; }
     assert(/리뷰 대기/.test(row), row || 'row not visible');
@@ -605,10 +605,24 @@ async function scenarios(d, ctx) {
       await sleep(300);
       r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent) })`, 20000, String(OB.no) + '-').catch(() => r);
     }
-    assert(r.title === '리뷰 대기' && r.buttons[0] === '커밋 준비', JSON.stringify(r));
+    assert(r.title === '리뷰 대기' && r.buttons[0] === '로컬에 반영' && r.buttons[1] === '커밋 준비', JSON.stringify(r));
     return { note: `${row.replace(/, has actions/, '')} / ${r.title} [${r.buttons.join(', ')}]` };
   });
-  await step({ scenario: S9, action: '"커밋 준비" 클릭', expect: 'working copy 에는 B 만 (A 의 changelist 는 잠시 빼 둠), changelist 는 B 이름 하나' }, async () => {
+  await step({ scenario: S9, action: '"로컬에 반영" 클릭 (빌드 명령: echo)', expect: 'working copy 에는 B 만, changelist 없음, 빌드 출력, 상태 표시줄 "#N 로컬 반영됨", 상태 상자 "로컬에 반영됨"' }, async () => {
+    ctx.svc.setLocalBuild(scopeId, 'echo svnwt-local-build-ok');
+    await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="applyLocal"]').click(); return true; }`, 15000, String(OB.no) + '-');
+    await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /로컬 반영됨/.test(e.textContent))`, 30000, 'status bar');
+    const readme = fsx.readFileSync(readmeWc, 'utf8');
+    assert(/\(B\)/.test(readme) && !/\(A\)/.test(readme) && !/Changelist/.test(svnSt()), readme + svnSt());
+    let r = {};
+    for (let i = 0; i < 40 && r.title !== '로컬에 반영됨'; i++) {
+      await sleep(300);
+      r = await d.webview(`(doc) => ({ title: doc.querySelector('.next-title').textContent, buttons: [...doc.querySelectorAll('.next .actions button')].map((b) => b.textContent) })`, 20000, String(OB.no) + '-').catch(() => r);
+    }
+    assert(r.title === '로컬에 반영됨' && r.buttons[0] === '커밋 준비', JSON.stringify(r));
+    return { note: `${r.title} [${r.buttons.join(', ')}] / ${svnSt().split(/\r?\n/).filter((l) => /^[MAD?]/.test(l)).join(' ')}` };
+  });
+  await step({ scenario: S9, action: '반영된 상태에서 "커밋 준비" 클릭', expect: 'working copy 에는 B 만 (A 의 changelist 는 잠시 빼 둠), changelist 는 B 이름 하나' }, async () => {
     await d.webview(`(doc) => { doc.querySelector('.next button[data-cmd="commitSvn"]').click(); return true; }`, 15000, String(OB.no) + '-');
     await d.waitFor(`[...document.querySelectorAll('.statusbar-item')].some((e) => /커밋 준비됨/.test(e.textContent))`, 30000, 'status bar');
     const readme = fsx.readFileSync(readmeWc, 'utf8');

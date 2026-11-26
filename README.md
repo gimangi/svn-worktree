@@ -17,7 +17,7 @@ SVN working copy (D:\svn\proj)            svnwt 저장 위치 (D:\svn\proj.svnwt
 1. **Git for Windows** 설치: <https://git-scm.com/download/win> 또는 `winget install --id Git.Git -e`
 2. **SVN 명령줄 클라이언트** 설치: TortoiseSVN 설치 시 *command line client tools* 선택
    (`winget install --id TortoiseSVN.TortoiseSVN -e --override "/passive ADDLOCAL=ALL"`)
-3. 확장 설치: `code --install-extension svn-worktree-0.5.1.vsix`
+3. 확장 설치: `code --install-extension svn-worktree-0.5.2.vsix`
    (또는 VS Code 확장 보기 → `...` → *VSIX에서 설치*)
 4. VS Code 재시작
 
@@ -40,13 +40,18 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
    - *Copilot 리뷰 요청*: 에이전트가 diff를 검토해 verdict·코멘트를 남기고 이 화면에 표시
    - *테스트 화면*: 에이전트가 Playwright 등 UI 테스트를 worktree에서 돌린 뒤 `svnwt_task_attach_screenshots`로 첨부한 스크린샷·동영상과 통과/실패 (실행별로 보관)
    - SVN 커밋 메시지 편집 (자동 저장)
-4. **커밋 준비 (사람)** — 리뷰 화면의 *커밋 준비* 를 누른 뒤, scope 폴더에서 TortoiseSVN 커밋 창을 열어 OK 를 누릅니다.
+4. **로컬에 반영 (빌드까지)** — 로컬 IIS 처럼 SVN working copy 에서 도는 환경에서 확인하려면 리뷰 화면의 *로컬에 반영* 을 누릅니다.
+   - 다른 로컬 변경은 잠시 빼 두고 SVN BASE 위에 이 작업만 올린 뒤 scope 의 빌드 명령을 실행합니다 (처음 반영할 때 한 번 묻고, scope 우클릭 *로컬 반영 빌드 명령 설정…* 으로 바꿈. scope 폴더에서 `cmd.exe` 로 실행).
+   - 확인한 뒤 *커밋 준비* 를 누르면 changelist 만 붙입니다. TortoiseSVN 으로 바로 커밋해도 svnwt 가 감지해서 정리합니다. *되돌리기* 하면 빼 둔 변경이 그대로 돌아옵니다. 반영 중에 working copy 에서 고친 작업 파일은 보관본에 복사한 뒤 되돌립니다.
+   - 한 번에 한 작업만 반영됩니다. 상태 표시줄 *#N 로컬 반영됨* 에서 커밋 준비 / 다시 빌드 / 되돌리기.
+   - **에이전트 테스트**: 에이전트는 `svnwt_test_request` 로 반영을 요청하고, 요청은 차례로 처리됩니다. 반영 전에 *예 / 아니요 / 항상* 을 묻습니다 (설정 `svnwt.localApply.agentRequests`). 에이전트는 반영·빌드가 끝나면 로컬 사이트를 테스트하고 `svnwt_test_release` 로 돌려줍니다. DB 를 같이 쓰므로 데이터를 바꾸는 테스트는 요청에 표시하고 테스트 데이터만 씁니다.
+5. **커밋 준비 (사람)** — 리뷰 화면의 *커밋 준비* 를 누른 뒤, scope 폴더에서 TortoiseSVN 커밋 창을 열어 OK 를 누릅니다.
    - scope 안의 다른 로컬 변경(다른 작업, 직접 고친 것, 기존 changelist)은 잠시 따로 보관하고 SVN BASE 로 되돌립니다. scope 밖은 건드리지 않습니다.
    - 깨끗한 BASE 위에 git 의 **이 작업만** 올립니다. 커밋 창에는 이 작업 파일만 작업 이름 changelist (`svnwt-<번호>-<제목>`) 로 묶여 체크돼 있습니다. 커밋 메시지는 클립보드에 있습니다.
    - 오래 걸리면 진행 알림의 *취소* 로 멈출 수 있습니다 (빼 둔 변경을 되돌림). 단계별 진행과 실행한 svn/git 명령은 출력 패널 *SVN Worktree* 에 남습니다.
    - 커밋이 감지되거나 *커밋 취소* 를 누르면, 보관했던 변경을 changelist 까지 그대로 되돌립니다. 커밋된 내용과 겹쳐 되돌릴 수 없는 파일은 보관본을 남기고 알려 줍니다.
    - 작업끼리 working copy 에서 부딪히지 않습니다. 막히는 경우는 SVN 에 새로 커밋된 내용과 같은 줄을 고쳤을 때뿐이며, 이때는 *rebase 후 커밋 준비* 로 이어집니다.
-5. **커밋 후 정리** — 커밋이 끝나면 두 가지를 따로 할 수 있습니다.
+6. **커밋 후 정리** — 커밋이 끝나면 두 가지를 따로 할 수 있습니다.
    - *SVN 남은 변경 정리…* (리뷰 화면, scope 우클릭, 명령 팔레트): scope 폴더에 남은 SVN 변경(되돌려 놓은 다른 로컬 수정, 커밋에서 뺀 파일 등)을 골라 버립니다. worktree 와 git 커밋은 그대로입니다. 버리기 전에 파일을 svnwt 저장 폴더의 `discarded\` 에 복사해 둡니다. 버전 관리 안 되는 파일은 기본으로 선택되지 않고, 커밋 대기 중인 작업 파일은 목록에서 빠집니다.
    - *보관 (worktree 정리)*: worktree 폴더와 브랜치를 지우고 진행 중 목록에서 뺍니다. 커밋 기록(`refs/svnwt/archive/<작업>`)·리뷰·에이전트 대화·테스트 화면은 남아서 scope 아래 *보관된 작업* 에서 커밋별 diff 까지 볼 수 있습니다 (돋보기 버튼으로 제목 검색). 커밋하지 않은 worktree 변경은 커밋해서 같이 보관합니다. 완전히 지우려면 보관된 작업 우클릭 → *보관 기록 삭제*.
 
@@ -91,6 +96,7 @@ Git/SVN이 없으면 확장이 설치 안내를 띄웁니다. 다른 위치에 �
 | `svnwt_task_rename` | 작업 이름 변경 |
 | `svnwt_task_review_get` / `svnwt_task_review_submit` | PR 형태 리뷰 |
 | `svnwt_task_attach_screenshots` | UI 테스트 스크린샷·동영상을 리뷰 화면에 첨부 (Playwright 출력 자동 수집) |
+| `svnwt_test_request` / `svnwt_test_wait` / `svnwt_test_release` / `svnwt_test_queue` | 작업을 로컬(SVN working copy)에 반영해 테스트 요청 (차례 대기, 사용자 확인) / 반영·빌드 결과 기다리기 / 테스트 끝내고 되돌리기 / 큐 보기 |
 | `svnwt_task_changelist` / `svnwt_task_unland` | 리뷰 대기 표시 / changelist 되돌리기 |
 | `svnwt_rule_add` / `svnwt_rule_list` | 앞으로 항상 지킬 규칙 저장 / 목록 |
 | `svnwt_task_remove` / `svnwt_path_map` | 작업 보관 (worktree 삭제, 커밋 기록 유지) / SVN 경로 ↔ worktree 경로 변환 |

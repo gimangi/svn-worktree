@@ -25,6 +25,12 @@ the same way an agent works on a git branch/worktree and opens a pull request.
    first, e.g. \`npm ci\`; enable screenshots with \`use: { screenshot: 'on' }\` or page.screenshot in tests),
    then call \`svnwt_task_attach_screenshots\` so the screens appear in the review panel. Test outputs
    (test-results/, playwright-report/, node_modules/) are excluded from commits automatically.
+6a. Checking the change on the real local environment (the local IIS site / app that runs from the SVN working copy,
+   with the shared DB) is possible only one task at a time: commit, then call \`svnwt_test_request\` (say what you will
+   test in \`note\`, \`writes=true\` if the test changes DB data) and \`svnwt_test_wait\` until the status is \`applied\`.
+   The user may refuse. Test against the local site, attach screenshots, then ALWAYS call \`svnwt_test_release\` so the
+   user's own changes come back. Never edit files in the working copy during the test; fix in the worktree, commit,
+   and request again. On the shared DB use only test accounts / test data and clean up what you created.
 7. When the work is done: review it (\`svnwt_task_review_get\`, then \`svnwt_task_review_submit\`), then call
    \`svnwt_task_changelist\`. It marks the task ready for review and does not touch the SVN working copy:
    at commit time the human presses "커밋 준비", which puts only this task on the working copy. Tell the user

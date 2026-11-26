@@ -22,6 +22,7 @@ const store = require('./store');
 
 const BASE_BRANCH = 'svn-base';
 const BASE_REF = 'refs/heads/' + BASE_BRANCH;
+const TEST_OPEN = ['queued', 'asking', 'building', 'applied']; // test requests not finished yet
 const BOT = { GIT_AUTHOR_NAME: 'svnwt', GIT_AUTHOR_EMAIL: 'svnwt@localhost', GIT_COMMITTER_NAME: 'svnwt', GIT_COMMITTER_EMAIL: 'svnwt@localhost' };
 const SVN_DEFAULT_GLOBAL_IGNORES = '*.o *.lo *.la *.al .libs *.so *.so.[0-9]* *.a *.pyc *.pyo __pycache__ *.rej *~ #*# .#* .*.swp .DS_Store [Tt]humbs.db';
 
@@ -44,6 +45,7 @@ const relPosix = (base, p) => toPosix(path.relative(base, p));
 const fromPosix = (base, rel) => path.join(base, ...rel.split('/'));
 const bufEq = (a, b) => (a === null || a === undefined ? (b === null || b === undefined) : (b !== null && b !== undefined && Buffer.compare(a, b) === 0));
 const isBinary = (b) => !!b && b.subarray(0, 8000).includes(0);
+const hashBuf = (b) => require('crypto').createHash('sha1').update(b).digest('hex');
 
 function slugify(s) {
   return String(s || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 28).replace(/-+$/, '');
@@ -416,6 +418,28 @@ class Service {
     return { task, old, changelist: task.changelist };
   }
 
+  /**
+   * The human says a task marked 커밋 완료 is not committed (wrong detection, or the commit was reverted): back to
+   * 진행 중, so 로컬 반영 / 커밋 준비 work again. The task's git commits are untouched; nothing in SVN changes.
+   * Files of its changelist still in the working copy stay there (커밋 준비 sets them aside like any local change).
+   */
+  async reopenTask(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    if (task.status !== 'committed') throw new Error(`커밋 완료 상태인 작업만 되돌릴 수 있습니다 (지금: ${task.status}).`);
+    const svn = await this.svn();
+    const inWc = (await svn.status(scope.svnPath)).filter((e) => e.changelist === task.changelist).map((e) => relPosix(scope.svnPath, e.path));
+    const was = { committedAt: task.committedAt || null, landed: task.landed || null };
+    task.status = 'active';
+    task.landed = null;
+    delete task.committedAt;
+    delete task.leftovers;
+    delete task.commitVerified;
+    task.reopenedAt = now();
+    task.reopened = was;
+    this._saveTask(scope, task);
+    return { task: task.id, status: task.status, changelistInWc: inWc };
+  }
+
   listTasks({ scope: scopeRef, includeArchived = false } = {}) {
     const scopes = scopeRef ? [this.resolveScope(scopeRef)] : this.listScopes();
     const res = [];
@@ -614,7 +638,8 @@ class Service {
     Object.assign(res, this._order(scope, task));
     if (task.status === 'active' || task.status === 'landed') res.occupants = checkSvn ? await this.wcOccupantsLive(task.id).catch(() => this.wcOccupants(task.id)) : this.wcOccupants(task.id);
     const marker = this._commitMarker(scope);
-    if (marker) res.commitInProgress = { task: marker.task, at: marker.at, external: !!marker.external, mine: marker.task === task.id };
+    if (marker && marker.kind === 'test') { const ts = this.testState(scope.id) || {}; res.testInProgress = { task: marker.task, at: marker.at, sha: marker.sha, mine: marker.task === task.id, phase: marker.phase, ready: !!ts.ready, building: !!ts.building }; }
+    else if (marker) res.commitInProgress = { task: marker.task, at: marker.at, external: !!marker.external, mine: marker.task === task.id };
     return res;
   }
 
@@ -969,7 +994,8 @@ class Service {
    * Apply the task onto the SVN working copy and put touched files into changelist svnwt-<id>.
    * @param {{dryRun?:boolean, autoCommit?:boolean, force?:boolean}} opts
    */
-  async landTask(ref, { dryRun = false, autoCommit = false, force = false, overwrite = false, inStash = false } = {}) {
+  /** @param {{at?: string}} [opts] at: put the task as of this commit (an earlier commit of the task; test runs) */
+  async landTask(ref, { dryRun = false, autoCommit = false, force = false, overwrite = false, inStash = false, at = null } = {}) {
     const { scope, task } = this.resolveTask(ref);
     this._assertActive(task);
     const git = await this.git(scope);
@@ -977,12 +1003,14 @@ class Service {
     if (!inStash) this._assertNoCommitInProgress(scope);
     const wt = await this._worktreeState(scope, task);
     if (wt.rebasing || wt.merging) throw new Error('sync(rebase/merge)가 진행 중입니다. 먼저 완료하세요.');
-    if (wt.dirty.length) {
+    if (wt.dirty.length && !at) {
       if (!autoCommit) throw new Error(`worktree 에 커밋되지 않은 변경이 ${wt.dirty.length}개 있습니다. svnwt_task_commit 으로 커밋하거나 autoCommit=true 를 사용하세요.`);
       if (!dryRun) await this.commitTask(task.id, `${task.title} (auto commit before changelist)`);
     }
     return this._scopeLock(scope, `작업 #${task.no} SVN changelist 반영`, async () => {
-      const { tip, base } = await this._range(scope, task);
+      const range = await this._range(scope, task);
+      const tip = at || range.tip;
+      const base = at ? ((await git.mergeBase(BASE_REF, at)) || range.base) : range.base;
       const changes = await git.nameStatus(base, tip);
       const behind = Number(decode(await git.buf(['rev-list', '--count', `${base}..${BASE_REF}`])).trim()) || 0;
       const lastLanded = task.landed && task.landed.commit && (await git.revParse(task.landed.commit)) ? task.landed.commit : null;
@@ -1593,24 +1621,38 @@ class Service {
    */
   stashCommit(ref, opts) { return proc.trace(() => this._stashCommit(ref, opts), '[커밋 준비]'); }
 
-  async _stashCommit(ref, { token } = {}) {
+  /**
+   * @param {{token?: object, mode?: 'commit'|'test', at?: string}} [opts]
+   *   mode 'test': the same set-aside / apply / restore for a test on the working copy (local IIS site etc.): the task
+   *   as of commit `at` (default: branch tip), no commit expected; endTest puts everything back.
+   */
+  async _stashCommit(ref, { token, mode = 'commit', at = null } = {}) {
     const { scope, task } = this.resolveTask(ref);
-    if (!['active', 'landed'].includes(task.status)) throw new Error('진행 중인 작업만 커밋할 수 있습니다.');
+    const isTest = mode === 'test';
+    const label = isTest ? '로컬 반영' : '커밋 준비';
+    const labelObj = isTest ? '로컬 반영을' : '커밋 준비를';
+    const labelSubj = isTest ? '로컬 반영이' : '커밋 준비가';
+    if (!['active', 'landed'].includes(task.status)) throw new Error(isTest ? '진행 중인 작업만 로컬에 반영할 수 있습니다.' : '진행 중인 작업만 커밋할 수 있습니다.');
     this._assertNoCommitInProgress(scope);
     const t0 = Date.now();
-    const step = (msg) => this._step(`[커밋 준비 #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    const step = (msg) => this._step(`[${label} #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     const cancelled = () => !!(token && token.cancelled);
-    const check = () => { if (cancelled()) { const e = new Error('커밋 준비를 취소했습니다.'); e.cancelled = true; throw e; } };
+    const check = () => { if (cancelled()) { const e = new Error(`${labelObj} 취소했습니다.`); e.cancelled = true; throw e; } };
     step(`시작: ${task.title} (상태 ${task.status})`);
     const svn = await this.svn();
     const git = await this.git(scope);
     const root = scope.svnPath; // only the scope: svn status of a whole large checkout is what made this slow
     const wt = await this._worktreeState(scope, task);
     if (wt.rebasing || wt.merging) throw new Error('worktree 에서 rebase 가 진행 중입니다. 먼저 끝내세요.');
-    if (wt.dirty.length) { step(`worktree 의 커밋 안 된 변경 ${wt.dirty.length}개를 git 커밋`); await this.commitTask(task.id, `${task.title} (SVN 커밋 전 자동 커밋)`); }
-    const { tip, base } = await this._range(scope, task);
+    let sha = null;
+    if (isTest) {
+      sha = await this._taskCommit(scope, task, at); // uncommitted worktree edits are not part of a test (it is pinned to a commit)
+    } else if (wt.dirty.length) { step(`worktree 의 커밋 안 된 변경 ${wt.dirty.length}개를 git 커밋`); await this.commitTask(task.id, `${task.title} (SVN 커밋 전 자동 커밋)`); }
+    const range = await this._range(scope, task);
+    const tip = sha || range.tip;
+    const base = sha ? ((await git.mergeBase(BASE_REF, sha)) || range.base) : range.base;
     const changes = await git.nameStatus(base, tip);
-    if (!changes.length) throw new Error('커밋할 변경이 없습니다.');
+    if (!changes.length) throw new Error(isTest ? '로컬에 반영할 변경이 없습니다.' : '커밋할 변경이 없습니다.');
     step(`작업 변경 파일 ${changes.length}개. working copy 상태 읽는 중: ${root}`);
     check();
     const taskAbs = new Set();
@@ -1632,6 +1674,8 @@ class Service {
         let isDir = false;
         try { isDir = fs.statSync(e.path).isDirectory(); } catch (_) { /* deleted */ }
         const ent = { path: e.path, item: strayInTaskPath ? 'unversioned' : e.item, changelist: e.changelist || null, isDir };
+        if (e.movedFrom) ent.movedFrom = e.movedFrom;
+        if (e.movedTo) ent.movedTo = e.movedTo;
         if ((changed || strayInTaskPath) && !isDir) {
           const cur = readFileOrNull(e.path);
           if (cur !== null) { ent.copy = path.join(dir, String(n++)); fs.writeFileSync(ent.copy, cur); }
@@ -1653,15 +1697,19 @@ class Service {
     }
     // phase "stashing" until this task is on the working copy: if VS Code stops in between, the next start puts
     // everything back (see recoverCommits / the extension's activation)
-    const marker = { kind: 'stash', phase: 'stashing', task: task.id, at: now(), pid: process.pid, external: true, stash: dir, entries, prevStatus: task.status, prevLanded: task.landed || null };
+    const marker = { kind: isTest ? 'test' : 'stash', phase: 'stashing', task: task.id, at: now(), pid: process.pid, external: true, stash: dir, entries, prevStatus: task.status, prevLanded: task.landed || null };
+    if (isTest) marker.sha = sha;
     store.writeJson(this._markerFile(scope), marker);
-    store.touchEvents({ scope: scope.id, task: task.id, commit: 'begin' });
+    store.touchEvents({ scope: scope.id, task: task.id, commit: isTest ? 'test' : 'begin' });
     try {
       const changed = entries.filter((e) => CHANGED.includes(e.item));
       const tops = changed.filter((e) => !changed.some((o) => o !== e && o.isDir && isInside(e.path, o.path) && key(o.path) !== key(e.path)));
       step(`다른 변경 ${tops.length}개 revert, changelist 해제`);
       if (tops.length) await svn.withTargets(['revert', '--depth', 'infinity'], tops.map((e) => e.path), { okCodes: [1] });
-      for (const e of entries.filter((x) => !x.isDir && ['added', 'unversioned'].includes(x.item))) { try { fs.unlinkSync(e.path); } catch (_) { /* gone */ } }
+      for (const e of entries.filter((x) => !x.isDir && ['added', 'unversioned'].includes(x.item))) {
+        if (e.movedFrom && key(e.movedFrom) === key(e.path)) { try { fs.renameSync(e.path, e.movedFrom); } catch (_) { /* gone */ } continue; } // case-only svn move
+        try { fs.unlinkSync(e.path); } catch (_) { /* gone */ }
+      }
       for (const e of changed.filter((x) => x.isDir && x.item === 'added').sort((a, b) => b.path.length - a.path.length)) {
         try { fs.rmSync(e.path, { recursive: true, force: true }); } catch (_) { /* ignore */ }
       }
@@ -1673,8 +1721,8 @@ class Service {
       task.landed = null;
       this._saveTask(scope, task);
       check();
-      step('이 작업 변경을 working copy 에 반영');
-      const r = await this.landTask(task.id, { inStash: true });
+      step(isTest ? `이 작업 변경 (커밋 ${sha.slice(0, 8)}) 을 working copy 에 반영` : '이 작업 변경을 working copy 에 반영');
+      const r = await this.landTask(task.id, { inStash: true, at: sha });
       check();
       if (!r.ok) {
         step(`반영 불가 (${(r.blocked || []).map((b) => b.path).join(', ')}): 원래 상태로 되돌리는 중`);
@@ -1682,6 +1730,23 @@ class Service {
         return { ok: false, task: task.id, blocked: r.blocked, needsRebase: !!r.needsRebase || (r.blocked || []).some((b) => b.needsRebase), errors: r.errors };
       }
       const fresh = this.resolveTask(task.id).task;
+      if (isTest) {
+        // 로컬 반영 is plain local changes; the changelist comes with 커밋 준비 (prepareFromLocal)
+        const cl = (await svn.status(root)).filter((e) => e.changelist === task.changelist).map((e) => e.path);
+        if (cl.length) await svn.withTargets(['changelist', '--remove'], cl, { okCodes: [1] });
+        // what was put there, to tell afterwards which task files someone edited during the test
+        marker.landedHash = {};
+        for (const f of fresh.landed.files) { const b = readFileOrNull(fromPosix(scope.svnPath, f)); marker.landedHash[f] = b === null ? null : hashBuf(b); }
+        // the user may commit it straight from TortoiseSVN without 커밋 준비: commitDone compares with these
+        marker.revs = await this._lastChangedRevs(scope, fresh.landed.files);
+        marker.applied = true;
+        marker.phase = 'ready';
+        store.writeJson(this._markerFile(scope), marker);
+        store.touchEvents({ scope: scope.id, task: task.id, test: 'applied' });
+        const setAside = entries.filter((e) => CHANGED.includes(e.item) || e.item === 'unversioned').length;
+        step(`완료: 이 작업 파일 ${fresh.landed.files.length}개만 working copy 에 있음 (빼 둔 변경 ${setAside}개)`);
+        return { ok: true, task: task.id, sha, files: fresh.landed.files, setAside, stash: dir, svnPath: scope.svnPath };
+      }
       // only this task is changed in the working copy now; its files go in the task's changelist so the TortoiseSVN
       // commit dialog shows them as one group (checked by default), apart from unversioned files
       await this._ownChangelist(scope, fresh);
@@ -1702,8 +1767,8 @@ class Service {
       let restoreErr = null;
       try { await this._endStash(scope, this.resolveTask(task.id).task, marker); } catch (er) { restoreErr = er; }
       step(restoreErr ? `되돌리기 실패: ${restoreErr.message} (보관본: ${dir})` : '되돌리기 완료');
-      if (restoreErr) throw new Error(`커밋 준비가 중간에 멈췄고 되돌리기도 실패했습니다. 보관본: ${dir} (${restoreErr.message})`);
-      const err = new Error(e.cancelled ? '커밋 준비를 취소했습니다. working copy 는 원래대로 되돌렸습니다.' : `커밋 준비 실패 (원래 상태로 되돌렸습니다, 보관본: ${dir}): ${e.message}`);
+      if (restoreErr) throw new Error(`${labelSubj} 중간에 멈췄고 되돌리기도 실패했습니다. 보관본: ${dir} (${restoreErr.message})`);
+      const err = new Error(e.cancelled ? `${labelObj} 취소했습니다. working copy 는 원래대로 되돌렸습니다.` : `${label} 실패 (원래 상태로 되돌렸습니다, 보관본: ${dir}): ${e.message}`);
       err.cancelled = !!e.cancelled;
       throw err;
     }
@@ -1805,9 +1870,11 @@ class Service {
     const root = scope.svnPath;
     const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
     let committed = false;
+    const isTest = m.kind === 'test';
+    const edited = [];
     const t0 = Date.now();
-    const step = (msg) => this._step(`[커밋 정리 #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-    if (!m.revs) {
+    const step = (msg) => this._step(`[${isTest ? '로컬 반영 되돌리기' : '커밋 정리'} #${task.no}] ${msg} (+${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    if (!m.revs && !m.applied) {
       // stopped before the task was fully applied: take back whatever of it is in the working copy
       const mine = await this._taskPaths(scope, task).catch(() => new Set());
       const saved = new Set(m.entries.map((e) => key(e.path)));
@@ -1820,7 +1887,20 @@ class Service {
     } else if (task.landed) {
       step('커밋 여부 확인');
       committed = await this.commitDone(task.id);
-      step(committed ? '커밋됨: 남은 작업 변경 정리' : '커밋 안 됨: 작업 변경 되돌리기');
+      step(committed ? '커밋됨: 남은 작업 변경 정리' : `커밋 안 됨: ${isTest ? '로컬에 반영한 ' : ''}작업 변경 되돌리기`);
+      if (isTest && !committed) {
+        // task files someone changed in the working copy during the test: keep a copy before they are reverted
+        for (const f of task.landed.files) {
+          const abs = fromPosix(scope.svnPath, f);
+          const cur = readFileOrNull(abs);
+          const was = (m.landedHash || {})[f];
+          if (was === undefined || (cur === null ? was === null : was === hashBuf(cur))) continue;
+          const copy = cur === null ? null : path.join(m.stash, 'edited-during-test', ...f.split('/'));
+          if (copy) { store.ensureDir(path.dirname(copy)); fs.writeFileSync(copy, cur); }
+          edited.push({ path: f, copy, deleted: cur === null });
+        }
+        if (edited.length) step(`로컬 반영 중에 고친 작업 파일 ${edited.length}개를 보관본에 복사: ${edited.map((e) => e.path).join(', ')}`);
+      }
       // what is left of the task (cancelled, or files left unchecked) goes: it is all in git
       const st = await svn.status(root);
       const mine = new Set(task.landed.files.map((f) => key(fromPosix(scope.svnPath, f))));
@@ -1836,11 +1916,23 @@ class Service {
     const kept = [];
     const toAdd = [];
     const toDelete = [];
+    const errors = [];
+    const handled = new Set();
+    for (const dst of m.entries.filter((x) => !x.isDir && x.item === 'added' && x.movedFrom)) {
+      const src = m.entries.find((x) => x !== dst && x.movedTo && key(x.path) === key(dst.movedFrom) && key(x.movedTo) === key(dst.path));
+      if (!src || !fs.existsSync(src.path) || (committed && dst.changelist && dst.changelist === task.changelist)) continue;
+      const r = await svn.raw(['move', '--parents', src.path, dst.path]);
+      if (r.code !== 0) { errors.push(`svn move ${relPosix(root, src.path)} -> ${relPosix(root, dst.path)}: ${decode(r.stderr).trim()}`); continue; }
+      if (dst.copy) fs.writeFileSync(dst.path, fs.readFileSync(dst.copy));
+      handled.add(src);
+      handled.add(dst);
+    }
     for (const e of m.entries.filter((x) => x.isDir && x.item === 'added').sort((a, b) => a.path.length - b.path.length)) {
       store.ensureDir(e.path);
       toAdd.push(e.path);
     }
     for (const e of m.entries.filter((x) => !x.isDir && (CHANGED.includes(x.item) || x.item === 'unversioned'))) {
+      if (handled.has(e)) continue;
       if (committed && e.changelist && e.changelist === task.changelist) continue;
       const saved = e.copy ? fs.readFileSync(e.copy) : null;
       const oldBase = e.base ? fs.readFileSync(e.base) : null;
@@ -1863,7 +1955,6 @@ class Service {
       if (out !== null) { store.ensureDir(path.dirname(e.path)); fs.writeFileSync(e.path, out); }
       if (e.item === 'added') toAdd.push(e.path);
     }
-    const errors = [];
     step(`svn add ${toAdd.length}개, delete ${toDelete.length}개, changelist 복원`);
     if (toAdd.length) { try { await svn.withTargets(['add', '--force', '--parents', '--depth', 'empty'], toAdd); } catch (err) { errors.push(err.message); } }
     if (toDelete.length) { try { await svn.withTargets(['delete', '--force'], toDelete); } catch (err) { errors.push(err.message); } }
@@ -1886,8 +1977,19 @@ class Service {
     }
 
     fs.rmSync(this._markerFile(scope), { force: true });
-    if (!kept.length && !errors.length) fs.rmSync(m.stash, { recursive: true, force: true });
+    const keepStash = kept.length || errors.length || edited.some((e) => e.copy);
+    if (!keepStash) fs.rmSync(m.stash, { recursive: true, force: true });
     const fresh = this.resolveTask(task.id).task;
+    if (isTest && !committed) {
+      fresh.status = m.prevStatus === 'landed' && m.prevLanded ? 'landed' : 'active';
+      fresh.landed = fresh.status === 'landed' ? m.prevLanded : null;
+      this._saveTask(scope, fresh);
+      store.touchEvents({ scope: scope.id, task: task.id, test: 'ended' });
+      return {
+        task: task.id, test: true, sha: m.sha, committed: false, restored: m.entries.length - kept.length,
+        kept: kept.map((e) => ({ path: relPosix(root, e.path), copy: e.copy || null })), edited, stash: keepStash ? m.stash : null, errors,
+      };
+    }
     if (committed) {
       fresh.status = 'committed';
       fresh.committedAt = now();
@@ -1903,7 +2005,7 @@ class Service {
     if (committed) { try { await this.refreshScope(scope.id); } catch (_) { /* best effort */ } }
     return {
       task: task.id, committed, restored: m.entries.length - kept.length,
-      kept: kept.map((e) => ({ path: relPosix(root, e.path), copy: e.copy || null })), stash: kept.length || errors.length ? m.stash : null, errors,
+      kept: kept.map((e) => ({ path: relPosix(root, e.path), copy: e.copy || null })), edited, test: isTest || undefined, stash: keepStash ? m.stash : null, errors,
     };
   }
 
@@ -1912,7 +2014,307 @@ class Service {
   _commitMarker(scope) { return store.readJson(this._markerFile(scope), null); }
   _assertNoCommitInProgress(scope) {
     const m = this._commitMarker(scope);
+    if (m && m.kind === 'test') throw new Error(`작업 ${m.task} 이(가) 로컬(SVN working copy)에 반영돼 있습니다 (${m.at}). 먼저 되돌리거나 그 작업을 커밋 준비하세요.`);
     if (m) throw new Error(`작업 ${m.task} 의 SVN 커밋이 진행 중입니다 (${m.at}). 커밋 창을 닫은 뒤 다시 시도하세요.`);
+  }
+
+  // ---------------------------------------------------------------- test on the working copy (one at a time)
+  /**
+   * The working copy (the local IIS site etc.) can show one state at a time: a test puts one task, pinned to a
+   * commit, on the clean SVN BASE with everything else set aside (same machinery as 커밋 준비), and endTest puts
+   * everything back. Requests from agents wait in a queue per scope; the extension asks the user before applying.
+   */
+  /** Full sha of `at` (default: branch tip) if it is a commit of the task. */
+  async _taskCommit(scope, task, at) {
+    const { git, tip, base } = await this._range(scope, task);
+    if (!at) return tip;
+    const full = await git.revParse(String(at));
+    if (!full) throw new Error(`커밋을 찾을 수 없습니다: ${at}`);
+    if (full === tip) return full;
+    const inTask = (await git.raw(['merge-base', '--is-ancestor', full, tip])).code === 0
+      && (await git.raw(['merge-base', '--is-ancestor', base, full])).code === 0 && full !== base;
+    if (!inTask) throw new Error(`#${task.no} 작업의 커밋이 아닙니다: ${String(at).slice(0, 8)}`);
+    return full;
+  }
+
+  /** The test currently on the scope's working copy (null when none). */
+  testState(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    const m = this._commitMarker(scope);
+    if (!m || m.kind !== 'test') return null;
+    let no = null;
+    let title = '';
+    try { const t = this.resolveTask(m.task).task; no = t.no; title = t.title; } catch (_) { /* gone */ }
+    const item = this._testItems(scope).find((x) => ['building', 'applied'].includes(x.status) && x.task === m.task) || null;
+    const ready = m.phase === 'ready' && !(item && item.status === 'building');
+    return { scope: scope.id, task: m.task, no, title, sha: m.sha, at: m.at, phase: m.phase, ready, building: !!item && item.status === 'building', svnPath: scope.svnPath, item: item ? item.id : null, by: item ? item.by : 'user' };
+  }
+
+  /** Put the task (as of `at`) on the working copy for a test. */
+  applyTest(ref, { at = null, token } = {}) { return proc.trace(() => this._stashCommit(ref, { token, mode: 'test', at }), '[로컬 반영]'); }
+
+  /** Take the tested task back out and put everything that was set aside back. */
+  async endTest(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const m = this._commitMarker(scope);
+    if (!m || m.kind !== 'test' || m.task !== task.id) return { task: task.id, test: true, restored: 0, kept: [], edited: [], errors: [], notApplied: true };
+    this._step(`[로컬 반영 되돌리기 #${task.no}] 시작 (작업 변경 빼기, 빼 두었던 변경 복구)`);
+    const r = await proc.trace(() => this._endStash(scope, task, m), '[로컬 반영 되돌리기]');
+    // the request that held the working copy is over (also when restored after a restart, not by testRelease)
+    if (this._testItems(scope).some((x) => x.task === task.id && ['building', 'applied'].includes(x.status))) {
+      await this._testQueueEdit(scope, (items) => {
+        for (const x of items.filter((y) => y.task === task.id && ['building', 'applied'].includes(y.status))) {
+          Object.assign(x, { status: 'done', endedAt: now(), restore: { restored: r.restored, kept: r.kept, edited: r.edited, stash: r.stash, errors: r.errors } });
+        }
+      });
+    }
+    this._step(`[로컬 반영 되돌리기 #${task.no}] 완료: 복구 ${r.restored}개${r.kept.length ? `, 보관본에 남김 ${r.kept.length}개` : ''}${(r.edited || []).length ? `, 반영 중에 고친 파일 ${(r.edited || []).length}개 보관` : ''}`);
+    return r;
+  }
+
+  /**
+   * 로컬 반영 then build (when the scope has a build command): what "이 작업을 로컬에 반영" does.
+   * A failed build leaves the task applied (to look at it); the result says so.
+   */
+  async localApply(ref, { at = null, token, onOutput, build = true } = {}) {
+    const r = await this.applyTest(ref, { at, token });
+    if (!r.ok || !build) return r;
+    const { scope } = this.resolveTask(ref);
+    if (!(scope.localBuild || '').trim()) return Object.assign({}, r, { build: null });
+    this._step(`[로컬 반영 #${this.resolveTask(ref).task.no}] 빌드: ${scope.localBuild}`);
+    const b = await this.runLocalBuild(scope.id, { token, onOutput });
+    return Object.assign({}, r, { build: b });
+  }
+
+  /** Command that builds the working copy after 로컬 반영 (run with cmd.exe in the scope folder). Empty: none. */
+  setLocalBuild(scopeRef, command) {
+    const scope = this.resolveScope(scopeRef);
+    scope.localBuild = String(command || '').trim();
+    this._saveScope(scope);
+    store.touchEvents({ scope: scope.id });
+    return { scope: scope.id, localBuild: scope.localBuild };
+  }
+
+  /** Run the scope's build command on the working copy; output goes to onOutput (lines) and a log file. */
+  async runLocalBuild(scopeRef, { token, onOutput, timeoutMin = 30 } = {}) {
+    const scope = this.resolveScope(scopeRef);
+    const command = (scope.localBuild || '').trim();
+    if (!command) return null;
+    const logFile = path.join(store.ensureDir(path.join(scope.home, 'builds')), `${now().replace(/[:.]/g, '-')}.log`);
+    const t0 = Date.now();
+    const { spawn, execFile } = require('child_process');
+    const lines = [];
+    let pending = Buffer.alloc(0);
+    const out = fs.openSync(logFile, 'w');
+    const emit = (buf, flush) => {
+      pending = Buffer.concat([pending, buf]);
+      const cut = flush ? pending.length : pending.lastIndexOf(0x0a) + 1;
+      if (cut <= 0) return;
+      const text = decode(pending.subarray(0, cut));
+      pending = pending.subarray(cut);
+      for (const l of text.split(/\r?\n/)) {
+        if (!l && flush) continue;
+        lines.push(l);
+        if (lines.length > 200) lines.shift();
+        try { fs.writeSync(out, l + '\r\n'); } catch (_) { /* log only */ }
+        if (onOutput) { try { onOutput(l); } catch (_) { /* ignore */ } }
+      }
+    };
+    const code = await new Promise((resolve) => {
+      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { cwd: scope.svnPath, windowsHide: true, windowsVerbatimArguments: true });
+      const stop = () => { try { execFile('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true }, () => {}); } catch (_) { /* gone */ } };
+      const iv = setInterval(() => {
+        if ((token && token.cancelled) || Date.now() - t0 > timeoutMin * 60000) { lines.push(token && token.cancelled ? '(빌드 취소)' : `(빌드 시간 초과: ${timeoutMin}분)`); stop(); }
+      }, 500);
+      child.stdout.on('data', (d) => emit(d));
+      child.stderr.on('data', (d) => emit(d));
+      child.on('error', (e) => { lines.push(`빌드 명령 실행 실패: ${e.message}`); clearInterval(iv); resolve(-1); });
+      child.on('close', (c) => { clearInterval(iv); resolve(c === null ? -1 : c); });
+    });
+    emit(Buffer.alloc(0), true);
+    try { fs.closeSync(out); } catch (_) { /* ignore */ }
+    const ms = Date.now() - t0;
+    this._step(`[로컬 빌드] ${code === 0 ? '성공' : `실패 (exit ${code})`} ${(ms / 1000).toFixed(1)}s — 로그 ${logFile}`);
+    return { ok: code === 0, code, ms, command, logFile, tail: lines.slice(-40) };
+  }
+
+  /**
+   * 커밋 준비 on top of 로컬 반영: the working copy already holds only this task, so only the changelist is added
+   * (and the commit is watched). Commits made in between are detected (committed: true).
+   */
+  async prepareFromLocal(ref) {
+    const { scope, task } = this.resolveTask(ref);
+    const m = this._commitMarker(scope);
+    if (!m || m.kind !== 'test' || m.task !== task.id || m.phase !== 'ready') throw new Error('이 작업은 로컬에 반영돼 있지 않습니다.');
+    if (await this.commitDone(task.id)) return { ok: false, committed: true, task: task.id };
+    await this._ownChangelist(scope, task);
+    m.kind = 'stash';
+    m.fromLocal = true;
+    store.writeJson(this._markerFile(scope), m);
+    if (this._testItems(scope).some((x) => x.task === task.id && ['building', 'applied'].includes(x.status))) {
+      await this._testQueueEdit(scope, (items) => {
+        for (const x of items.filter((y) => y.task === task.id && ['building', 'applied'].includes(y.status))) Object.assign(x, { status: 'done', endedAt: now(), endedBy: 'commit', summary: x.summary || '커밋 준비로 넘어감' });
+      });
+    }
+    store.touchEvents({ scope: scope.id, task: task.id, commit: 'begin' });
+    const fresh = this.resolveTask(task.id).task;
+    const help = await this.commitHelp(scope, fresh);
+    const CHANGED = ['modified', 'added', 'deleted', 'replaced', 'conflicted', 'missing', 'merged'];
+    return {
+      ok: true, task: task.id, files: fresh.landed.files, setAside: m.entries.filter((e) => CHANGED.includes(e.item) || e.item === 'unversioned').length,
+      stash: m.stash, targets: help.targets, messageFile: help.messageFile, message: help.suggestedMessage,
+    };
+  }
+
+  // queue: <scope home>/test-queue.json  { items: [{ id, task, no, title, sha, note, writes, by, status, at, ... }] }
+  // status: queued -> asking -> applied -> done | rejected | cancelled | failed
+  _testQueueFile(scope) { return path.join(scope.home, 'test-queue.json'); }
+  _testItems(scope) { return (store.readJson(this._testQueueFile(scope), { items: [] }).items) || []; }
+  async _testQueueEdit(scope, fn) {
+    return store.withLock(path.join(scope.home, 'test-queue.lock'), async () => {
+      const q = store.readJson(this._testQueueFile(scope), { items: [] });
+      q.items = q.items || [];
+      const before = JSON.stringify(q.items);
+      const r = await fn(q.items);
+      // keep the last 30 finished requests
+      const open = q.items.filter((x) => TEST_OPEN.includes(x.status));
+      const done = q.items.filter((x) => !TEST_OPEN.includes(x.status)).slice(-30);
+      q.items = q.items.filter((x) => open.includes(x) || done.includes(x));
+      // write (and wake the UIs) only on a change: the extension polls this, and every event makes it refresh
+      if (JSON.stringify(q.items) !== before) {
+        store.writeJson(this._testQueueFile(scope), q);
+        store.touchEvents({ scope: scope.id, testQueue: q.items.length });
+      }
+      return r;
+    }, { op: `${scope.id}: 테스트 큐`, timeoutMs: 60000 });
+  }
+
+  /**
+   * Ask for a test of a task (default: its newest commit). A request of the same task still waiting is replaced
+   * (newest commit wins). by 'user' is for the human's own "main 에 올려 테스트" (applied without asking).
+   */
+  async testRequest(ref, { at = null, note = '', writes = false, by = 'agent' } = {}) {
+    const { scope, task } = this.resolveTask(ref);
+    if (!['active', 'landed'].includes(task.status)) throw new Error('진행 중인 작업만 테스트할 수 있습니다.');
+    const sha = await this._taskCommit(scope, task, at);
+    return this._testQueueEdit(scope, (items) => {
+      let it = items.find((x) => x.task === task.id && x.status === 'queued');
+      if (it) Object.assign(it, { sha, note: note || it.note, writes: !!writes || it.writes, by, updatedAt: now() });
+      else {
+        it = { id: `${Date.now().toString(36)}-${task.no}`, scope: scope.id, task: task.id, no: task.no, title: task.title, sha, note, writes: !!writes, by, status: 'queued', at: now() };
+        items.push(it);
+      }
+      const waiting = items.filter((x) => x.status === 'queued' || x.status === 'asking');
+      return Object.assign({}, it, { position: waiting.indexOf(it) + 1, ahead: items.filter((x) => x.status === 'applied').length + waiting.indexOf(it) });
+    });
+  }
+
+  /** Requests of one scope (or every scope): open ones first in queue order, then the latest finished. */
+  testQueue(scopeRef) {
+    const scopes = scopeRef ? [this.resolveScope(scopeRef)] : this.listScopes().map((s) => this.resolveScope(s.id));
+    return scopes.flatMap((s) => this._testItems(s));
+  }
+
+  testItem(id) {
+    for (const s of this.listScopes()) {
+      const scope = this.resolveScope(s.id);
+      const it = this._testItems(scope).find((x) => x.id === id);
+      if (it) return { scope, item: it };
+    }
+    throw new Error(`테스트 요청을 찾을 수 없습니다: ${id}`);
+  }
+
+  async _testUpdate(id, patch) {
+    const { scope } = this.testItem(id);
+    return this._testQueueEdit(scope, (items) => { const it = items.find((x) => x.id === id); Object.assign(it, patch); return Object.assign({}, it); });
+  }
+
+  /**
+   * Runner (the extension): the next request to ask the user about, marked "asking"; null while a test or a
+   * commit holds the working copy, or while another request is being asked.
+   */
+  async testClaimNext(scopeRef) {
+    const scope = this.resolveScope(scopeRef);
+    if (this._commitMarker(scope)) return null;
+    if (!this._testItems(scope).some((x) => x.status === 'queued' && x.by !== 'user')) return null; // polled often: no lock, no write
+    return this._testQueueEdit(scope, (items) => {
+      if (items.some((x) => ['asking', 'building', 'applied'].includes(x.status))) return null;
+      const it = items.find((x) => x.status === 'queued' && x.by !== 'user');
+      if (!it) return null;
+      it.status = 'asking';
+      it.askedAt = now();
+      return Object.assign({}, it);
+    });
+  }
+
+  /** After a restart: requests left "asking" go back to the queue. */
+  async testResetAsking() {
+    for (const s of this.listScopes()) {
+      const scope = this.resolveScope(s.id);
+      if (!this._testItems(scope).some((x) => x.status === 'asking')) continue;
+      await this._testQueueEdit(scope, (items) => { for (const x of items.filter((y) => y.status === 'asking')) x.status = 'queued'; });
+    }
+  }
+
+  async testReject(id, reason = '사용자가 거절했습니다.') {
+    const { item } = this.testItem(id);
+    if (!['queued', 'asking'].includes(item.status)) return item;
+    return this._testUpdate(id, { status: 'rejected', reason, endedAt: now() });
+  }
+
+  /** Apply a request (the user said yes). Blocked files / errors end the request as "failed" with the reason. */
+  async testApplyItem(id, { token, onOutput } = {}) {
+    const { item } = this.testItem(id);
+    if (!['queued', 'asking'].includes(item.status)) throw new Error(`이미 처리된 테스트 요청입니다 (${item.status}).`);
+    let r;
+    try {
+      r = await this.applyTest(item.task, { at: item.sha, token });
+      if (r.ok) {
+        const { scope } = this.resolveTask(item.task);
+        if ((scope.localBuild || '').trim()) {
+          await this._testUpdate(id, { status: 'building', appliedAt: now(), files: r.files, setAside: r.setAside, svnPath: r.svnPath });
+          r.build = await this.runLocalBuild(scope.id, { token, onOutput });
+        }
+      }
+    } catch (e) {
+      await this._testUpdate(id, { status: e.cancelled ? 'cancelled' : 'failed', reason: e.message, endedAt: now() });
+      throw e;
+    }
+    if (!r.ok) {
+      const reason = `working copy 에 올릴 수 없는 파일: ${(r.blocked || []).map((b) => `${b.path}${b.reason ? ` (${b.reason})` : ''}`).join(', ')}`;
+      await this._testUpdate(id, { status: 'failed', reason, needsRebase: !!r.needsRebase, endedAt: now() });
+      return Object.assign({}, r, { item: id });
+    }
+    const build = r.build ? { ok: r.build.ok, code: r.build.code, ms: r.build.ms, logFile: r.build.logFile, tail: r.build.tail.slice(-20) } : null;
+    await this._testUpdate(id, { status: 'applied', appliedAt: now(), files: r.files, setAside: r.setAside, svnPath: r.svnPath, build });
+    return Object.assign({}, r, { item: id });
+  }
+
+  /**
+   * The test is over (agent or user): put the working copy back, record the result. A request still waiting is
+   * just cancelled.
+   */
+  async testRelease(id, { result = null, summary = '', by = 'agent' } = {}) {
+    const { item } = this.testItem(id);
+    if (item.status === 'queued' || item.status === 'asking') return this._testUpdate(id, { status: 'cancelled', reason: summary || '테스트 전에 취소함', endedAt: now() });
+    if (item.status !== 'applied') return Object.assign({}, item, { note: `이미 끝난 요청입니다 (${item.status}).` });
+    const restore = await this.endTest(item.task);
+    const done = await this._testUpdate(id, { status: 'done', result: result || null, summary, endedBy: by, endedAt: now() });
+    return Object.assign({}, done, { restore });
+  }
+
+  /** Wait until a request is applied, refused or over (agents poll this between their steps). */
+  async testWait(id, { timeoutSec = 120 } = {}) {
+    const end = Date.now() + Math.max(1, Math.min(600, timeoutSec)) * 1000;
+    for (;;) {
+      const { scope, item } = this.testItem(id);
+      if (!['queued', 'asking', 'building'].includes(item.status) || Date.now() >= end) {
+        const items = this._testItems(scope);
+        const waiting = items.filter((x) => x.status === 'queued' || x.status === 'asking');
+        return Object.assign({}, item, { position: waiting.findIndex((x) => x.id === id) + 1 || undefined, current: this.testState(scope.id) });
+      }
+      await store.sleep(1500);
+    }
   }
 
   /**
@@ -2192,6 +2594,7 @@ class Service {
     const { scope, task } = this.resolveTask(ref);
     const m = this._commitMarker(scope);
     if (!m || m.task !== task.id) return { task: task.id, committed: task.status === 'committed', restored: 0 };
+    if (m.kind === 'test') return this.endTest(task.id);
     if (m.kind === 'stash') {
       this._step(`[커밋 정리 #${task.no}] 시작 (커밋 판정, 남은 변경 정리, 빼 두었던 변경 복구)`);
       const r = await proc.trace(() => this._endStash(scope, task, m), '[커밋 정리]');
