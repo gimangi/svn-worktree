@@ -1,5 +1,11 @@
 # 변경 이력
 
+## 0.5.4
+- 새 창으로 분리한 diff 에서 Alt+← / Alt+→ / Alt+Shift+← / Alt+Shift+→ 가 VS Code 기본 동작(뒤로/앞으로, 선택 확장)으로 처리되던 문제
+  - 새 창의 편집기를 눌러도 VS Code 는 주 창의 탭 그룹(리뷰 화면)을 활성으로 알려 줘서 svnwt 가 단축키를 끄고 있었음. 이제 포커스가 있는 편집기(activeTextEditor)가 보이는 diff 탭으로 판단
+  - 단축키 조건의 worktree 경로 검사가 Windows 경로(`\`)에서 맞지 않던 것도 고침
+- 다른 확장이 같은 단축키를 쓰면(예: Visual Studio Keymap 의 Shift+Alt+←/→ = 열 선택) svnwt diff 에서 그 확장이 이기던 문제: 처음 diff 를 열 때 한 번 묻고, *추가* 를 누르면 사용자 단축키(keybindings.json)에 svnwt diff 에서만 쓰는 조건으로 넣음 (다른 곳에서는 그 확장의 단축키가 그대로 동작)
+
 ## 0.5.3
 - **로컬 반영 / 커밋 준비가 "양쪽에서 새로 추가됨" 으로 막히던 문제**: 작업이 새로 추가하는 파일이 working copy 의 버전 관리 밖 폴더(?, svn:ignore 포함) 안에 이미 있으면 그 파일을 빼 두지 않아 부딪혔음. 이제 그 폴더의 파일을 모두 빼 두었다가 되돌릴 때 그대로 돌려놓음 (예전에는 되돌릴 때 그 폴더를 통째로 지울 수 있었음)
 - **빌드 명령을 묻지 않음**: Visual Studio MSBuild(vswhere)와 가장 가까운 .sln 을 찾아 바로 빌드. 못 찾거나 빌드가 실패하면 *에이전트에게 빌드 맡기기* (에이전트가 svnwt_local_build_set / svnwt_local_build_run 으로 정하고 빌드)

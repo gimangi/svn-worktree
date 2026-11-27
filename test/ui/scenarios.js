@@ -222,6 +222,47 @@ async function scenarios(d, ctx) {
     assert(titles.some((t) => /mathutil\.h/.test(t)), 'the diff window does not show the next file: ' + titles.join(' | '));
     return { note: `창: ${titles.join(' | ')}` };
   });
+  await step({ scenario: S2, action: '분리한 diff 창에서 Alt+Shift+← → Alt+Shift+→ → Alt+←', expect: '새 창에서도 svnwt 단축키: 이전 파일, 다음 파일, 이전 변경 (VS Code 기본 동작이 아님)' }, async () => {
+    // the separate window is its own page: attach to it and send the keys there
+    const list = await (await fetch('http://127.0.0.1:9333/json/list')).json();
+    const win = list.find((x) => x.type === 'page' && /mathutil\.h/.test(x.title));
+    assert(win, 'diff window: ' + list.map((x) => x.title).join(' | '));
+    const { sessionId } = await d.cdp.send('Target.attachToTarget', { targetId: win.id, flatten: true });
+    const ev = async (expr) => (await d.cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }, sessionId)).result.value;
+    const press = async (key, mods) => {
+      const kc = { ArrowLeft: 37, ArrowRight: 39 }[key];
+      const base = { modifiers: mods, key, code: key, windowsVirtualKeyCode: kc, nativeVirtualKeyCode: kc };
+      await d.cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base }, sessionId);
+      await d.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base }, sessionId);
+    };
+    const title = async () => (await (await fetch('http://127.0.0.1:9333/json/list')).json()).find((x) => x.id === win.id).title;
+    const waitTitle = async (re) => { let t = ''; for (let i = 0; i < 30 && !re.test(t); i++) { await sleep(300); t = await title(); } return t; };
+    // a real click into the editor of a focused window (with only textarea.focus() VS Code's own state differs:
+    // the main window's group stays the active one and the shortcuts fell through to VS Code)
+    await d.cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId).catch(() => {});
+    const focusEditor = async () => {
+      const p = await ev(`(() => { const e = document.querySelector('.monaco-diff-editor .editor.modified .view-lines') || document.querySelector('.monaco-diff-editor .view-lines'); if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.left + 40, y: b.top + 8 }; })()`);
+      assert(p, 'no diff editor in the separate window');
+      await d.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: p.x, y: p.y, button: 'left', clickCount: 1, buttons: 1 }, sessionId);
+      await d.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p.x, y: p.y, button: 'left', clickCount: 1, buttons: 0 }, sessionId);
+      await sleep(500);
+    };
+    const seen = [await title()];
+    await focusEditor();
+    await press('ArrowLeft', 1 | 8); // Alt+Shift+←: previous file
+    seen.push(await waitTitle(/mathutil\.cpp/));
+    assert(/mathutil\.cpp/.test(seen[1]), 'Alt+Shift+← in the separate window did not go to the previous file: ' + seen.join(' → '));
+    await focusEditor();
+    await press('ArrowRight', 1 | 8); // Alt+Shift+→: next file
+    seen.push(await waitTitle(/mathutil\.h/));
+    assert(/mathutil\.h/.test(seen[2]), 'Alt+Shift+→ in the separate window: ' + seen.join(' → '));
+    await focusEditor();
+    await press('ArrowLeft', 1); // Alt+←: previous change (first change of this file -> previous file)
+    seen.push(await waitTitle(/mathutil\.cpp/));
+    assert(/mathutil\.cpp/.test(seen[3]), 'Alt+← in the separate window: ' + seen.join(' → '));
+    await d.cdp.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+    return { note: seen.join(' → ') };
+  });
   await step({ scenario: S2, action: '설정을 리뷰 화면 위(review)로 되돌린 뒤 파일 클릭', expect: '다시 리뷰 화면 탭 그룹에 좌우 diff' }, async () => {
     const cfg = readSettings();
     cfg['svnwt.diffPlacement'] = 'review';

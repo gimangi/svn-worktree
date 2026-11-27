@@ -254,9 +254,113 @@ async function offerSideBySide() {
   } catch (_) { /* optional */ }
 }
 
+/**
+ * Another extension's keybinding on the same key wins over ours when it sits further down its own list
+ * (VS Code ranks extension keybindings by 400 + their position; e.g. Visual Studio Keymap puts Shift+Alt+←/→ =
+ * column select at 29/32 of 51). User keybindings always win, so on a yes the diff keys go there, with the same
+ * "only in a svnwt diff" condition: everywhere else the other extension's key still works.
+ */
+const NAV_CMDS = ['svnwt.nextChange', 'svnwt.prevChange', 'svnwt.nextFile', 'svnwt.prevFile'];
+const normKey = (k) => { const p = String(k || '').toLowerCase().split('+').map((x) => x.trim()); const key = p.pop(); return [...p.sort(), key].join('+'); };
+const platKey = (b) => (process.platform === 'win32' ? b.win : process.platform === 'darwin' ? b.mac : b.linux) || b.key;
+const keyLabel = (k) => k.split('+').map((x) => ({ alt: 'Alt', shift: 'Shift', ctrl: 'Ctrl', cmd: 'Cmd', left: '←', right: '→' }[x] || x)).join('+');
+function navKeyConflicts() {
+  const own = ((extCtx.extension.packageJSON.contributes || {}).keybindings || []).map((b, i) => ({ b, w: i + 1 })).filter((x) => NAV_CMDS.includes(x.b.command));
+  const appRoot = path.resolve(vscode.env.appRoot).toLowerCase();
+  const out = [];
+  for (const e of vscode.extensions.all) {
+    if (e.id === extCtx.extension.id || path.resolve(e.extensionPath).toLowerCase().startsWith(appRoot)) continue; // built-in ones rank below every installed extension
+    const kb = ((e.packageJSON || {}).contributes || {}).keybindings;
+    (Array.isArray(kb) ? kb : kb ? [kb] : []).forEach((b, i) => {
+      if (!b || !b.command || b.when === 'false' || String(b.command).startsWith('-')) return;
+      const k = normKey(platKey(b));
+      const m = own.find((x) => normKey(platKey(x.b)) === k);
+      if (m && i + 1 >= m.w) out.push({ ext: e, key: k, mine: m.b, theirs: b.command });
+    });
+  }
+  return out;
+}
+/** Outside strings: drop // and block comments of a JSONC text. */
+function stripJsonComments(s) {
+  let out = '';
+  for (let i = 0, str = false; i < s.length; i++) {
+    const c = s[i];
+    if (str) { out += c; if (c === '\\') out += s[++i] || ''; else if (c === '"') str = false; continue; }
+    if (c === '"') { str = true; out += c; continue; }
+    if (c === '/' && s[i + 1] === '/') { while (i < s.length && s[i] !== '\n') i++; out += '\n'; continue; }
+    if (c === '/' && s[i + 1] === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++; i++; continue; }
+    out += c;
+  }
+  return out;
+}
+async function addNavKeysToUser(conflicts) {
+  const mine = [...new Map(conflicts.map((x) => [x.mine.command, x.mine])).values()];
+  await vscode.commands.executeCommand('workbench.action.openGlobalKeybindingsFile');
+  let ed = null;
+  for (let i = 0; i < 40; i++) {
+    ed = vscode.window.activeTextEditor;
+    if (ed && /keybindings\.json$/i.test(ed.document.uri.path)) break;
+    ed = null;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!ed) throw new Error('keybindings.json 을 열지 못했습니다');
+  const doc = ed.document;
+  const text = doc.getText();
+  const plain = stripJsonComments(text);
+  const has = (b) => plain.includes(JSON.stringify(b.command)) && new RegExp(`"key"\\s*:\\s*"${platKey(b).replace(/[+]/g, '\\+')}"`, 'i').test(plain);
+  const add = mine.filter((b) => !has(b));
+  if (add.length) {
+    const body = add.map((b) => JSON.stringify({ key: platKey(b), command: b.command, when: b.when }, null, 2).replace(/^/gm, '  ')).join(',\n');
+    const end = text.lastIndexOf(']');
+    const ok = await ed.edit((eb) => {
+      if (end < 0 || !/\[/.test(plain)) { eb.replace(new vscode.Range(doc.positionAt(0), doc.positionAt(text.length)), `[\n${body}\n]\n`); return; }
+      const before = stripJsonComments(text.slice(0, end)).trimEnd();
+      const comma = before.endsWith('[') || before.endsWith(',') ? '' : ',';
+      eb.insert(doc.positionAt(end), `${comma}\n  // svnwt: diff 에서 변경·파일 이동 (다른 확장의 같은 단축키보다 먼저)\n${body}\n`);
+    });
+    if (!ok) throw new Error('keybindings.json 을 고치지 못했습니다');
+    await doc.save();
+  }
+  if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document === doc) await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  log(`사용자 단축키에 추가: ${add.map((b) => `${platKey(b)} → ${b.command}`).join(', ') || '(이미 있음)'}`);
+  vscode.window.showInformationMessage(`사용자 단축키(keybindings.json)에 추가했습니다: ${mine.map((b) => keyLabel(normKey(platKey(b)))).join(', ')}. svnwt diff 에서만 쓰고, 다른 곳에서는 원래 단축키가 동작합니다.`);
+}
+/** Asked once per set of extensions that take the diff keys. */
+async function offerNavKeys() {
+  try {
+    if (!extCtx) return;
+    const c = navKeyConflicts();
+    if (!c.length) return;
+    const ids = [...new Set(c.map((x) => x.ext.id))].sort().join(',');
+    if (extCtx.globalState.get('navKeysAsked') === ids) return;
+    await extCtx.globalState.update('navKeysAsked', ids);
+    const name = (e) => { const n = e.packageJSON.displayName; return n && !/^%.*%$/.test(n) ? n : e.id; };
+    const names = [...new Set(c.map((x) => name(x.ext)))].join(', ');
+    const keys = [...new Set(c.map((x) => keyLabel(x.key)))].join(', ');
+    const a = await vscode.window.showInformationMessage(`${names} 확장이 ${keys} 를 먼저 가져가서 svnwt diff 에서 이 단축키가 동작하지 않습니다. svnwt diff 에서만 svnwt 가 쓰도록 사용자 단축키(keybindings.json)에 추가할까요? 다른 곳에서는 그 확장의 단축키가 그대로 동작합니다.`, '추가', '그대로');
+    if (a === '추가') await addNavKeysToUser(c);
+  } catch (e) { log('단축키 충돌 확인: ' + e.message); vscode.window.showWarningMessage('사용자 단축키에 추가하지 못했습니다: ' + e.message); }
+}
+
 // the diff on screen and its place in the task's file list (이전/다음 파일)
 let diffNav = null;
-const activeTab = () => { try { return vscode.window.tabGroups.activeTabGroup.activeTab; } catch (_) { return null; } };
+/**
+ * The tab the user is in. With a diff in a separate window VS Code keeps reporting the main window's group as
+ * the active one, while activeTextEditor is the diff's editor: prefer the diff tab that shows that editor.
+ */
+const activeTab = () => {
+  try {
+    const ed = vscode.window.activeTextEditor;
+    const u = ed && ed.document.uri.toString();
+    if (u) {
+      for (const g of vscode.window.tabGroups.all) {
+        const t = g.activeTab;
+        if (t && t.input instanceof vscode.TabInputTextDiff && (t.input.modified.toString() === u || t.input.original.toString() === u)) return t;
+      }
+    }
+    return vscode.window.tabGroups.activeTabGroup.activeTab;
+  } catch (_) { return null; }
+};
 /** A task file diff tab (label "name (rN ↔ #no i/n)"): its scope, task number and the two sides. */
 function taskDiffOf(tab) {
   if (!tab || !isTaskDiffTab(tab)) return null;
@@ -269,8 +373,7 @@ function updateDiffNavContext() {
   const inp = tab && tab.input;
   // any task diff tab counts, not only the last one opened (an older tab, a tab restored after a reload)
   const on = !!((diffNav && inp instanceof vscode.TabInputTextDiff && inp.modified.toString() === diffNav.right) || taskDiffOf(tab));
-  vscode.commands.executeCommand('setContext', 'svnwt.diffNav', on);
-}
+  vscode.commands.executeCommand('setContext', 'svnwt.diffNav', on);}
 /** Make diffNav the diff of the active tab (the user may have switched to another diff tab). */
 async function syncDiffNav() {
   const k = taskDiffOf(activeTab());
@@ -307,6 +410,7 @@ async function openFileDiff(taskId, f, opts = {}) {
   if (detach) await moveDiffToNewWindow();
   updateDiffNavContext();
   offerSideBySide();
+  offerNavKeys();
 }
 
 async function moveDiffToNewWindow() {

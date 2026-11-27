@@ -2,7 +2,7 @@
   "name": "svn-worktree",
   "displayName": "SVN Worktree (svnwt)",
   "description": "SVN working copy에서 작업 단위 git worktree, PR 형태의 리뷰, 작업별 SVN changelist를 제공하고 Copilot에 MCP 도구로 노출합니다.",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "publisher": "svnwt",
   "license": "MIT",
   "engines": {
@@ -973,27 +973,27 @@
       {
         "command": "svnwt.nextChange",
         "key": "alt+right",
-        "when": "svnwt.diffNav"
+        "when": "(svnwt.diffNav || (isInDiffEditor && (resourceScheme == svnwt-git || resourcePath =~ /svnwt[\\\\/](scopes[\\\\/])?[^\\\\/]+[\\\\/]wt[\\\\/]/i)))"
       },
       {
         "command": "svnwt.prevChange",
         "key": "alt+left",
-        "when": "svnwt.diffNav"
+        "when": "(svnwt.diffNav || (isInDiffEditor && (resourceScheme == svnwt-git || resourcePath =~ /svnwt[\\\\/](scopes[\\\\/])?[^\\\\/]+[\\\\/]wt[\\\\/]/i)))"
       },
       {
         "command": "svnwt.nextFile",
         "key": "shift+alt+right",
-        "when": "svnwt.diffNav"
+        "when": "(svnwt.diffNav || (isInDiffEditor && (resourceScheme == svnwt-git || resourcePath =~ /svnwt[\\\\/](scopes[\\\\/])?[^\\\\/]+[\\\\/]wt[\\\\/]/i)))"
       },
       {
         "command": "svnwt.prevFile",
         "key": "shift+alt+left",
-        "when": "svnwt.diffNav"
+        "when": "(svnwt.diffNav || (isInDiffEditor && (resourceScheme == svnwt-git || resourcePath =~ /svnwt[\\\\/](scopes[\\\\/])?[^\\\\/]+[\\\\/]wt[\\\\/]/i)))"
       },
       {
         "command": "svnwt.backToReview",
         "key": "escape",
-        "when": "svnwt.diffNav && editorTextFocus && !findWidgetVisible && !suggestWidgetVisible && !editorHasSelection && !editorHasMultipleSelections && !parameterHintsVisible && !renameInputVisible && !inSnippetMode && !inlineChatVisible && !inlineSuggestionVisible && !markersNavigationVisible && !codeActionMenuVisible && !isComposing"
+        "when": "(svnwt.diffNav || (isInDiffEditor && (resourceScheme == svnwt-git || resourcePath =~ /svnwt[\\\\/](scopes[\\\\/])?[^\\\\/]+[\\\\/]wt[\\\\/]/i))) && editorTextFocus && !findWidgetVisible && !suggestWidgetVisible && !editorHasSelection && !editorHasMultipleSelections && !parameterHintsVisible && !renameInputVisible && !inSnippetMode && !inlineChatVisible && !inlineSuggestionVisible && !markersNavigationVisible && !codeActionMenuVisible && !isComposing"
       },
       {
         "command": "svnwt.askAboutSelection",
